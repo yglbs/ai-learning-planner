@@ -1187,13 +1187,13 @@ export function getPlanStats(planId: string) {
   const totalStages = db.prepare("SELECT COUNT(*) as c FROM stage WHERE plan_id = ?").get(planId) as { c: number };
   const completedStages = db.prepare("SELECT COUNT(*) as c FROM stage WHERE plan_id = ? AND status = 'completed'").get(planId) as { c: number };
   const totalAssessments = db.prepare(
-    "SELECT COUNT(DISTINCT a.stage_id) as c FROM assessment a JOIN stage s ON a.stage_id = s.id WHERE s.plan_id = ?"
+    "SELECT COUNT(DISTINCT a.stage_id) as c FROM assessment a JOIN stage s ON a.stage_id = s.id WHERE s.plan_id = ? AND a.type != 'skipped'"
   ).get(planId) as { c: number };
   const firstPassAssessments = db.prepare(
     `SELECT COUNT(*) as c FROM (
        SELECT stage_id, MIN(attempt_number) as first_attempt, passed
        FROM assessment a JOIN stage s ON a.stage_id = s.id
-       WHERE s.plan_id = ? AND passed = 1
+       WHERE s.plan_id = ? AND passed = 1 AND a.type != 'skipped'
        GROUP BY stage_id
        HAVING first_attempt = 1
      )`

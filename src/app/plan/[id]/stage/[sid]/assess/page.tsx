@@ -40,6 +40,7 @@ interface PerQuestionResult {
 interface HistoricalAssessment {
   id: string;
   stage_id: string;
+  type?: string;
   score_overall: number;
   score_coverage: number;
   score_depth: number;
@@ -107,6 +108,8 @@ export default function AssessPage() {
   const [regenerating, setRegenerating] = useState(false);
   const [historyList, setHistoryList] = useState<HistoricalAssessment[]>([]);
   const [selectedHistory, setSelectedHistory] = useState<HistoricalAssessment | null>(null);
+  const [skipConfirm, setSkipConfirm] = useState(false);
+  const [skipping, setSkipping] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -207,6 +210,31 @@ export default function AssessPage() {
     }
   }
 
+  async function handleSkip() {
+    setSkipping(true);
+    try {
+      const res = await fetch(`/api/stage/${stageId}/assess`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skip: true }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "跳过失败");
+      }
+
+      const data = await res.json();
+      toast.success(data.hasNext ? "已跳过检测，下一阶段已解锁" : "已跳过检测，全部阶段已完成");
+      router.push(`/plan/${planId}`);
+    } catch (e) {
+      toast.error((e as Error).message);
+      setSkipConfirm(false);
+    } finally {
+      setSkipping(false);
+    }
+  }
+
   if (loading || regenerating) {
     return (
       <div className="flex items-center justify-center min-h-screen">
@@ -289,15 +317,28 @@ export default function AssessPage() {
                       包含选择题、判断题、填空题和简答题，展示你的学习成果
                     </p>
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-xs text-muted-foreground shrink-0"
-                    onClick={handleRegenerate}
-                    disabled={regenerating}
-                  >
-                    {regenerating ? "⏳ 出题中..." : "🔄 重新出题"}
-                  </Button>
+                  <div className="flex items-center gap-1 shrink-0">
+                    {stage.status === "active" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-xs text-muted-foreground"
+                        onClick={() => setSkipConfirm(true)}
+                        disabled={skipping}
+                      >
+                        ⏭ 跳过检测
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-xs text-muted-foreground"
+                      onClick={handleRegenerate}
+                      disabled={regenerating}
+                    >
+                      {regenerating ? "⏳ 出题中..." : "🔄 重新出题"}
+                    </Button>
+                  </div>
                 </div>
                 <div className="flex gap-2 flex-wrap">
                   {questions.map((q, i) => (
@@ -455,10 +496,10 @@ export default function AssessPage() {
                     >
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
-                          <span className="text-lg">{h.passed ? "✅" : "❌"}</span>
+                          <span className="text-lg">{h.type === "skipped" ? "⏭" : h.passed ? "✅" : "❌"}</span>
                           <div>
                             <div className="text-sm font-medium">
-                              第 {h.attempt_number} 次检测
+                              {h.type === "skipped" ? `第 ${h.attempt_number} 次 · 跳过检测` : `第 ${h.attempt_number} 次检测`}
                             </div>
                             <div className="text-xs text-muted-foreground">
                               {new Date(h.created_at).toLocaleString("zh-CN")}
@@ -466,10 +507,16 @@ export default function AssessPage() {
                           </div>
                         </div>
                         <div className="text-right">
-                          <div className={`text-lg font-bold ${h.score_overall >= 70 ? "text-green-400" : "text-amber-400"}`}>
-                            {Math.round(h.score_overall)}
-                          </div>
-                          <div className="text-[10px] text-muted-foreground">综合评分</div>
+                          {h.type === "skipped" ? (
+                            <div className="text-sm text-muted-foreground">已跳过</div>
+                          ) : (
+                            <>
+                              <div className={`text-lg font-bold ${h.score_overall >= 70 ? "text-green-400" : "text-amber-400"}`}>
+                                {Math.round(h.score_overall)}
+                              </div>
+                              <div className="text-[10px] text-muted-foreground">综合评分</div>
+                            </>
+                          )}
                         </div>
                       </div>
                     </button>
@@ -630,6 +677,34 @@ export default function AssessPage() {
           )}
         </div>
       </main>
+
+      {skipConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+          <div className="w-full max-w-md rounded-2xl border border-border/40 bg-card p-6 shadow-xl space-y-4">
+            <h3 className="text-lg font-semibold">跳过本阶段检测？</h3>
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              跳过后将直接完成本阶段并解锁下一阶段，不会进行 AI 评分。你可以之后通过「再次检测」补做。
+            </p>
+            <div className="flex gap-3 pt-1">
+              <Button
+                variant="outline"
+                className="flex-1 h-11 rounded-xl"
+                onClick={() => setSkipConfirm(false)}
+                disabled={skipping}
+              >
+                取消
+              </Button>
+              <Button
+                className="flex-1 h-11 rounded-xl"
+                onClick={handleSkip}
+                disabled={skipping}
+              >
+                {skipping ? "处理中..." : "确认跳过"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

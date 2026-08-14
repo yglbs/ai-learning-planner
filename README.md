@@ -2,6 +2,20 @@
 
 基于 Next.js + Electron 的 AI 学习规划工具，支持 Web 和桌面端。自动生成阶段化学习计划、苏格拉底式 AI 教学、多题型检测、间隔复习与模拟面试，数据全部存储在本地 SQLite。
 
+## 界面预览
+
+| 首页 | 首次配置 |
+|:---:|:---:|
+| ![首页](docs/screenshots/01-home.png) | ![首次配置](docs/screenshots/02-onboarding.png) |
+
+| AI 教学对话 | 阶段检测 |
+|:---:|:---:|
+| ![AI 教学对话](docs/screenshots/03-teach-chat.png) | ![阶段检测](docs/screenshots/04-assessment.png) |
+
+| 教学背景主题 | 导师头像 |
+|:---:|:---:|
+| ![教学背景主题](docs/screenshots/05-teach-theme.png) | ![导师头像](docs/screenshots/06-tutor-avatar.png) |
+
 ## 功能概览
 
 - **多种建计划方式**：按学习目标 / 上传书籍 / 导入本地代码仓库生成阶段计划
@@ -107,6 +121,7 @@ pnpm electron:build
 │   ├── db/                  # SQLite schema + 查询
 │   └── lib/                 # AI、LLM、代码项目、数据源
 ├── electron/main.js         # Electron 主进程
+├── docs/screenshots/        # README 界面截图
 ├── data/                    # SQLite 数据库存储目录（开发）
 └── scripts/                 # 构建辅助脚本（standalone / 安装到 Applications）
 ```

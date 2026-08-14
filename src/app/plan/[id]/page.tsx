@@ -88,6 +88,7 @@ type RightPanel = "learn" | "resources" | "project" | "info" | "notes" | "assess
 
 interface AssessmentRecord {
   id: string;
+  type?: string;
   score_overall: number;
   score_coverage: number;
   score_depth: number;
@@ -126,6 +127,7 @@ export default function PlanDashboard() {
   const [dueReviewCount, setDueReviewCount] = useState(0);
   const [assessmentHistory, setAssessmentHistory] = useState<AssessmentRecord[]>([]);
   const [expandedAssessmentId, setExpandedAssessmentId] = useState<string | null>(null);
+  const [skippingAssess, setSkippingAssess] = useState(false);
 
   const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState("");
@@ -281,6 +283,32 @@ export default function PlanDashboard() {
       toast.error((e as Error).message);
     } finally {
       setGeneratingResources(false);
+    }
+  }
+
+  async function handleSkipAssessment() {
+    if (!selectedStageId) return;
+    const stage = stages.find((s) => s.id === selectedStageId);
+    if (stage?.status !== "active") return;
+    if (!confirm("跳过本阶段检测？将直接完成本阶段并解锁下一阶段。")) return;
+    setSkippingAssess(true);
+    try {
+      const res = await fetch(`/api/stage/${selectedStageId}/assess`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skip: true }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "跳过失败");
+      }
+      const data = await res.json();
+      toast.success(data.hasNext ? "已跳过检测，下一阶段已解锁" : "已跳过检测，全部阶段已完成");
+      await loadData();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setSkippingAssess(false);
     }
   }
 
@@ -552,14 +580,27 @@ export default function PlanDashboard() {
                 </div>
 
                 {(selectedStage.status === "active" || selectedStage.status === "completed") && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="rounded-lg text-xs shrink-0"
-                    onClick={() => router.push(`/plan/${planId}/stage/${selectedStageId}/assess`)}
-                  >
-                    {selectedStage.status === "completed" ? "🔄 再次检测" : "✍️ 申请检测"}
-                  </Button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {selectedStage.status === "active" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="rounded-lg text-xs text-muted-foreground"
+                        onClick={handleSkipAssessment}
+                        disabled={skippingAssess}
+                      >
+                        {skippingAssess ? "处理中..." : "⏭ 跳过检测"}
+                      </Button>
+                    )}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="rounded-lg text-xs"
+                      onClick={() => router.push(`/plan/${planId}/stage/${selectedStageId}/assess`)}
+                    >
+                      {selectedStage.status === "completed" ? "🔄 再次检测" : "✍️ 申请检测"}
+                    </Button>
+                  </div>
                 )}
               </div>
 
@@ -1088,20 +1129,28 @@ export default function PlanDashboard() {
                                 <Badge
                                   variant="secondary"
                                   className={`text-[10px] px-2 py-0.5 ${
-                                    item.passed
-                                      ? "bg-green-500/10 text-green-400"
-                                      : "bg-amber-500/10 text-amber-400"
+                                    item.type === "skipped"
+                                      ? "bg-slate-500/10 text-slate-300"
+                                      : item.passed
+                                        ? "bg-green-500/10 text-green-400"
+                                        : "bg-amber-500/10 text-amber-400"
                                   }`}
                                 >
-                                  {item.passed ? "通过" : "未通过"}
+                                  {item.type === "skipped" ? "已跳过" : item.passed ? "通过" : "未通过"}
                                 </Badge>
                                 <div className="flex-1 min-w-0">
                                   <p className="text-sm font-medium">
-                                    第 {item.attempt_number} 次检测 · 总分 {Math.round(item.score_overall)}
+                                    {item.type === "skipped"
+                                      ? `第 ${item.attempt_number} 次 · 跳过检测`
+                                      : `第 ${item.attempt_number} 次检测 · 总分 ${Math.round(item.score_overall)}`}
                                   </p>
                                   <p className="text-[11px] text-muted-foreground mt-0.5">
                                     {new Date(item.created_at).toLocaleString("zh-CN")}
-                                    {" · "}覆盖 {Math.round(item.score_coverage)} / 深度 {Math.round(item.score_depth)} / 准确 {Math.round(item.score_accuracy)}
+                                    {item.type !== "skipped" && (
+                                      <>
+                                        {" · "}覆盖 {Math.round(item.score_coverage)} / 深度 {Math.round(item.score_depth)} / 准确 {Math.round(item.score_accuracy)}
+                                      </>
+                                    )}
                                   </p>
                                 </div>
                                 <span className="text-muted-foreground text-xs">{expanded ? "收起" : "展开"}</span>
