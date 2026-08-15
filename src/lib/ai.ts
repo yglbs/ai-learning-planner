@@ -73,6 +73,8 @@ export async function generatePlan(params: {
   background?: string;
   expected_outcome?: string;
   constraints?: string[];
+  learning_mode?: string;
+  career_identity?: string;
 }): Promise<GeneratedPlan> {
   const levelMap: Record<string, string> = {
     beginner: "零基础入门",
@@ -84,6 +86,8 @@ export async function generatePlan(params: {
     params.motivation ? `学习动机: ${params.motivation}` : "",
     params.background ? `当前背景: ${params.background}` : "",
     params.expected_outcome ? `期望成果: ${params.expected_outcome}` : "",
+    params.learning_mode ? `学习模式: ${params.learning_mode}` : "",
+    params.career_identity ? `职业定位: ${params.career_identity}` : "",
   ].filter(Boolean).join("\n");
 
   const prompt = `你是一位全能学习规划师。你可以为任何领域制定学习计划（技术、投资、商业、语言、艺术、人文等）。
@@ -161,6 +165,8 @@ export async function generatePlanFromBook(params: {
   motivation?: string;
   background?: string;
   expected_outcome?: string;
+  learning_mode?: string;
+  career_identity?: string;
 }): Promise<GeneratedPlan> {
   const levelMap: Record<string, string> = {
     beginner: "零基础入门",
@@ -172,6 +178,8 @@ export async function generatePlanFromBook(params: {
     params.motivation ? `学习动机: ${params.motivation}` : "",
     params.background ? `当前背景: ${params.background}` : "",
     params.expected_outcome ? `期望成果: ${params.expected_outcome}` : "",
+    params.learning_mode ? `学习模式: ${params.learning_mode}` : "",
+    params.career_identity ? `职业定位: ${params.career_identity}` : "",
   ].filter(Boolean).join("\n");
 
   const bookContentTruncated = params.book_content.length > 50000
@@ -233,6 +241,8 @@ export async function generatePlanFromCode(params: {
   motivation?: string;
   background?: string;
   expected_outcome?: string;
+  learning_mode?: string;
+  career_identity?: string;
 }): Promise<GeneratedPlan> {
   const levelMap: Record<string, string> = {
     beginner: "零基础入门",
@@ -240,17 +250,83 @@ export async function generatePlanFromCode(params: {
     advanced: "有经验想进阶",
   };
 
+  const mode = params.learning_mode || "business_through_tech";
+  const career = params.career_identity || "";
+  const isExperienced =
+    career === "senior" ||
+    career === "staff" ||
+    params.skill_level === "advanced" ||
+    params.skill_level === "intermediate";
+
+  const modeLabelMap: Record<string, string> = {
+    business: "业务优先",
+    technical: "技术优先",
+    business_through_tech: "业务穿透技术",
+  };
+  const careerLabelMap: Record<string, string> = {
+    junior: "初级工程师",
+    senior: "高级工程师",
+    staff: "资深/Staff 工程师",
+  };
+
   const contextBlock = [
     params.motivation ? `学习动机: ${params.motivation}` : "",
     params.background ? `当前背景: ${params.background}` : "",
     params.expected_outcome ? `期望成果: ${params.expected_outcome}` : "",
+    `学习模式: ${modeLabelMap[mode] || mode}`,
+    career ? `职业定位: ${careerLabelMap[career] || career}` : "",
   ].filter(Boolean).join("\n");
 
   const codeContentTruncated = params.code_content.length > 80000
     ? params.code_content.slice(0, 80000) + "\n\n[... 代码内容过长已截断 ...]"
     : params.code_content;
 
-  const prompt = `你是一位资深技术导师和代码教练。用户提供了一个真实代码仓库，请你像带新人读代码一样，制定「对着源码学」的阶段计划。
+  const pathStrategy = (() => {
+    if (mode === "business" || mode === "business_through_tech") {
+      if (isExperienced) {
+        return `学习路径必须按「业务接口优先」编排（禁止把第一阶段做成 main/启动琐事）：
+   - 阶段1：对外接口与路由盘点（HTTP/gRPC/Handler/Controller：有哪些业务能力、路径如何映射到方法）
+   - 阶段2：选 1-2 个核心业务场景，沿 Handler → Service → Repo/依赖 完整走通
+   - 阶段3：关键模块实现与数据模型/表设计（仅当代码中真实存在）
+   - 阶段4：并发/异步/边界与可观测性（按代码实际有的再写）
+   - 阶段5：设计取舍、可改进点与面试深挖
+   第一阶段标题/导读必须围绕「接口清单、路由表、Handler 职责」，不要以「认识 main 函数」为主题。
+   main/cmd 启动链最多作为接口阶段的附录，不可成为第一阶段主线。`;
+      }
+      return `学习路径按「业务场景 → 代码落点」编排：
+   - 先识别对外接口与核心业务 Handler
+   - 再沿一条请求链路走完
+   - 然后看存储/依赖与边界情况
+   - 最后做设计取舍与面试深挖
+   可以简要提及启动入口，但不要把「读懂 main」当成第一阶段核心目标。`;
+    }
+    if (isExperienced) {
+      return `学习路径按「架构与关键链路」编排：
+   - 服务边界与模块职责（含入口，但跳过保姆式解释）
+   - 核心请求/数据流
+   - 关键实现与权衡
+   - 并发/可观测性
+   - 改进与面试深挖`;
+    }
+    return `学习路径可以包含：
+   - 入口与启动链路
+   - 核心数据流/请求链路
+   - 关键模块实现
+   - 并发/边界与可观测性
+   - 可改进点与面试深挖`;
+  })();
+
+  const difficultyRules = isExperienced
+    ? `难度与提问口径（学习者已有基础/高级）：
+- 禁止初级盘问：不要问「main 里第一个调用的是什么函数」「端口从哪里读」这类语法级问题
+- 第一阶段就要做接口分析：列出关键路由/RPC、对应 Handler、输入输出与业务含义
+- assessment_questions 考察：接口设计、调用链权衡、改需求动哪里、边界失败怎么处理`
+    : `难度与提问口径（学习者偏入门）：
+- 可从更具体的文件/函数切入，但仍要落到业务含义
+- 避免只背概念，必须指到真实代码`;
+
+  const prompt = `你是一位资深技术导师和代码教练。用户提供了一个真实代码仓库，请制定「对着源码学」的阶段计划。
+注意：你不是在带零基础新人认识语法；必须严格服从学习者画像与学习模式。
 
 ## 项目信息
 项目名称: ${params.project_name}
@@ -269,23 +345,19 @@ ${contextBlock}
 
 ## 核心要求（必须严格执行）
 1. **只讲仓库里真实存在的代码**：阶段划分必须对应实际目录/模块/入口文件，禁止编造不存在的类、接口或框架能力
-2. 拆成 4-6 个阶段，学习路径固定为：
-   - 入口与启动链路（main/cmd/app 入口、配置加载、依赖注入）
-   - 核心数据流/请求链路（一次完整调用怎么走完）
-   - 关键模块实现（存储、缓存、业务服务等）
-   - 并发/异步/边界情况与可观测性（按代码实际有的再写）
-   - 可改进点与面试向深挖（基于真实设计取舍）
-3. 每个阶段的 key_topics 必须能在代码中找到落点（技术名 + 对应模块）
-4. 每个阶段 learning_objectives 写 2-4 个「能指着代码说明」的目标
-5. summary_text（约 800 字）必须包含固定小节：
-   - 【精读文件】列出本阶段要打开的 3-8 个具体相对路径
+2. ${pathStrategy}
+3. ${difficultyRules}
+4. 每个阶段的 key_topics 必须能在代码中找到落点（技术名 + 对应模块）
+5. 每个阶段 learning_objectives 写 2-4 个「能指着代码说明」的目标；业务×技术模式下目标要同时包含业务能力与代码落点
+6. summary_text（约 800 字）必须包含固定小节：
+   - 【精读文件】列出本阶段要打开的 3-8 个具体相对路径（业务×技术/高级时优先 Handler、router、service，而不是只列 main）
    - 【调用链路】用「文件A.函数X → 文件B.函数Y」描述主路径
    - 【设计取舍】指出至少 1 个真实设计决策及其利弊
-   - 【动手检查】给 1 个小实验（改一处/打日志/画图）
-6. core_output 必须是可验证产物（如「画出从 HTTP 入口到 DB 的序列图，并标注关键函数」）
-7. assessment_questions 必须是代码题：定位某文件函数、解释分支、改需求你会动哪里；禁止空泛概念题
-8. 总天数 = ${params.duration_weeks * 7} 天，按每日 ${params.daily_hours} 小时分配 estimated_days
-9. 标题要具体到模块，避免「基础入门」「进阶提升」这类空标题`;
+   - 【动手检查】给 1 个小实验（改一处/打日志/画图/补接口说明）
+7. core_output 必须是可验证产物（如「整理本服务对外接口清单并标注 Handler」或「画出某业务从接口到存储的序列图」）
+8. assessment_questions 必须是代码题：定位某文件函数、解释分支、改需求你会动哪里；禁止空泛概念题
+9. 总天数 = ${params.duration_weeks * 7} 天，按每日 ${params.daily_hours} 小时分配 estimated_days
+10. 标题要具体到模块/业务能力，避免「基础入门」「进阶提升」这类空标题`;
 
   if (useStructuredTextFallback()) {
     return deepSeekGenerateObject<GeneratedPlan>(prompt, PLAN_SCHEMA_DESC);

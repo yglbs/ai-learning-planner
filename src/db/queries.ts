@@ -1,3 +1,5 @@
+import type { StageOutline } from "@/lib/learning-types";
+
 import { getDb } from "./schema";
 import { v4 as uuidv4 } from "uuid";
 
@@ -19,6 +21,10 @@ export interface SystemConfig {
   review_notifications: boolean;
   default_review_interval_preset: string;
 }
+
+export type LearningMode = "business" | "technical" | "business_through_tech";
+export type CareerIdentity = "" | "junior" | "senior" | "staff";
+export type OutlineStatus = "pending" | "draft" | "confirmed";
 
 export interface LearningPlan {
   id: string;
@@ -45,6 +51,10 @@ export interface LearningPlan {
   source_path: string;
   source_file_tree: string;
   source_files: string[];
+  learning_mode: LearningMode;
+  career_identity: CareerIdentity;
+  architecture_snapshot: string;
+  architecture_generated_at: string | null;
 }
 
 export interface Stage {
@@ -65,6 +75,10 @@ export interface Stage {
   assessment_questions: string[];
   core_output: string;
   learning_objectives: string[];
+  outline_status: OutlineStatus;
+  outline_json: string;
+  outline_confirmed_at: string | null;
+  learning_started_at: string | null;
 }
 
 export interface Resource {
@@ -138,6 +152,22 @@ function parseJsonField(value: unknown, fallback: unknown[] = []): unknown[] {
   }
 }
 
+const PLAN_UPDATE_WHITELIST = new Set([
+  "title", "goal_description", "duration_weeks", "daily_hours", "skill_level", "status",
+  "total_stages", "current_stage_index", "started_at", "completed_at",
+  "user_motivation", "user_background", "expected_outcome",
+  "review_enabled", "adaptive_enabled", "analytics_enabled", "review_interval_preset",
+  "source_type", "source_path", "source_file_tree", "source_files",
+  "learning_mode", "career_identity", "architecture_snapshot", "architecture_generated_at",
+]);
+
+const STAGE_UPDATE_WHITELIST = new Set([
+  "order_index", "title", "description", "key_topics", "estimated_days", "status",
+  "summary_text", "resource_completion_rate", "unlocked_at", "completed_at",
+  "real_world_cases", "assessment_questions", "core_output", "learning_objectives",
+  "outline_status", "outline_json", "outline_confirmed_at", "learning_started_at",
+]);
+
 export function getConfig(): SystemConfig {
   const db = getDb();
   const row = db.prepare("SELECT * FROM system_config WHERE id = 1").get() as Record<string, unknown>;
@@ -196,36 +226,48 @@ export function createPlan(plan: {
   source_path?: string;
   source_file_tree?: string;
   source_files?: string[];
+  learning_mode?: LearningMode;
+  career_identity?: CareerIdentity;
 }): string {
   const db = getDb();
   const id = uuidv4();
+  const defaultMode = plan.source_type === "code" ? "business_through_tech" : "business";
   db.prepare(
     `INSERT INTO learning_plan (
       id, title, goal_description, duration_weeks, daily_hours, skill_level, status,
       user_motivation, user_background, expected_outcome,
-      source_type, source_path, source_file_tree, source_files
-    ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)`
+      source_type, source_path, source_file_tree, source_files,
+      learning_mode, career_identity
+    ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id, plan.title, plan.goal_description, plan.duration_weeks, plan.daily_hours, plan.skill_level,
     plan.user_motivation || "", plan.user_background || "", plan.expected_outcome || "",
     plan.source_type || "goal",
     plan.source_path || "",
     plan.source_file_tree || "",
-    JSON.stringify(plan.source_files || [])
+    JSON.stringify(plan.source_files || []),
+    plan.learning_mode || defaultMode,
+    plan.career_identity || ""
   );
   return id;
 }
 
 function mapPlanRow(row: Record<string, unknown>): LearningPlan {
+  const sourceType = (row.source_type as string) || "goal";
   return {
     ...(row as unknown as LearningPlan),
     review_enabled: row.review_enabled !== 0,
     adaptive_enabled: row.adaptive_enabled !== 0,
     analytics_enabled: row.analytics_enabled !== 0,
-    source_type: (row.source_type as string) || "goal",
+    source_type: sourceType,
     source_path: (row.source_path as string) || "",
     source_file_tree: (row.source_file_tree as string) || "",
     source_files: parseJsonField(row.source_files) as string[],
+    learning_mode: ((row.learning_mode as string) ||
+      (sourceType === "code" ? "business_through_tech" : "business")) as LearningMode,
+    career_identity: ((row.career_identity as string) || "") as CareerIdentity,
+    architecture_snapshot: (row.architecture_snapshot as string) || "",
+    architecture_generated_at: (row.architecture_generated_at as string) || null,
   };
 }
 
@@ -255,15 +297,22 @@ export function updatePlan(id: string, updates: Partial<LearningPlan>) {
   const values: unknown[] = [];
 
   for (const [key, value] of Object.entries(updates)) {
+    if (!PLAN_UPDATE_WHITELIST.has(key)) continue;
     if (key === "source_files") {
       fields.push(`${key} = ?`);
       values.push(JSON.stringify(value || []));
+      continue;
+    }
+    if (key === "review_enabled" || key === "adaptive_enabled" || key === "analytics_enabled") {
+      fields.push(`${key} = ?`);
+      values.push(value ? 1 : 0);
       continue;
     }
     fields.push(`${key} = ?`);
     values.push(value);
   }
 
+  if (fields.length === 0) return;
   fields.push("updated_at = datetime('now')");
   values.push(id);
   db.prepare(`UPDATE learning_plan SET ${fields.join(", ")} WHERE id = ?`).run(...values);
@@ -282,12 +331,14 @@ export function createStage(stage: {
   core_output?: string;
   real_world_cases?: string[];
   assessment_questions?: string[];
+  outline_status?: OutlineStatus;
 }): string {
   const db = getDb();
   const id = uuidv4();
+  const outlineStatus = stage.outline_status ?? "pending";
   db.prepare(
-    `INSERT INTO stage (id, plan_id, order_index, title, description, key_topics, estimated_days, status, summary_text, unlocked_at, learning_objectives, core_output, real_world_cases, assessment_questions)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO stage (id, plan_id, order_index, title, description, key_topics, estimated_days, status, summary_text, unlocked_at, learning_objectives, core_output, real_world_cases, assessment_questions, outline_status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     stage.plan_id,
@@ -302,15 +353,17 @@ export function createStage(stage: {
     JSON.stringify(stage.learning_objectives || []),
     stage.core_output || "",
     JSON.stringify(stage.real_world_cases || []),
-    JSON.stringify(stage.assessment_questions || [])
+    JSON.stringify(stage.assessment_questions || []),
+    outlineStatus
   );
+
+  ensureDefaultLearningItems(id);
+
   return id;
 }
 
-export function getStagesByPlan(planId: string): Stage[] {
-  const db = getDb();
-  const rows = db.prepare("SELECT * FROM stage WHERE plan_id = ? ORDER BY order_index").all(planId) as Record<string, unknown>[];
-  return rows.map((row) => ({
+function mapStageRow(row: Record<string, unknown>): Stage {
+  return {
     ...row,
     key_topics: parseJsonField(row.key_topics) as string[],
     learning_objectives: parseJsonField(row.learning_objectives) as string[],
@@ -318,21 +371,24 @@ export function getStagesByPlan(planId: string): Stage[] {
     assessment_questions: parseJsonField(row.assessment_questions) as string[],
     resource_completion_rate: row.resource_completion_rate as number,
     core_output: (row.core_output as string) || "",
-  })) as unknown as Stage[];
+    outline_status: ((row.outline_status as string) || "confirmed") as OutlineStatus,
+    outline_json: (row.outline_json as string) || "",
+    outline_confirmed_at: (row.outline_confirmed_at as string) || null,
+    learning_started_at: (row.learning_started_at as string) || null,
+  } as unknown as Stage;
+}
+
+export function getStagesByPlan(planId: string): Stage[] {
+  const db = getDb();
+  const rows = db.prepare("SELECT * FROM stage WHERE plan_id = ? ORDER BY order_index").all(planId) as Record<string, unknown>[];
+  return rows.map(mapStageRow);
 }
 
 export function getStage(id: string): Stage | null {
   const db = getDb();
   const row = db.prepare("SELECT * FROM stage WHERE id = ?").get(id) as Record<string, unknown> | undefined;
   if (!row) return null;
-  return {
-    ...row,
-    key_topics: parseJsonField(row.key_topics) as string[],
-    learning_objectives: parseJsonField(row.learning_objectives) as string[],
-    real_world_cases: parseJsonField(row.real_world_cases) as string[],
-    assessment_questions: parseJsonField(row.assessment_questions) as string[],
-    core_output: (row.core_output as string) || "",
-  } as unknown as Stage;
+  return mapStageRow(row);
 }
 
 export function updateStage(id: string, updates: Partial<Stage & { key_topics: string[] }>) {
@@ -343,6 +399,7 @@ export function updateStage(id: string, updates: Partial<Stage & { key_topics: s
   const jsonFields = ["key_topics", "learning_objectives", "real_world_cases", "assessment_questions"];
 
   for (const [key, value] of Object.entries(updates)) {
+    if (!STAGE_UPDATE_WHITELIST.has(key)) continue;
     if (jsonFields.includes(key)) {
       fields.push(`${key} = ?`);
       values.push(JSON.stringify(value));
@@ -352,6 +409,7 @@ export function updateStage(id: string, updates: Partial<Stage & { key_topics: s
     }
   }
 
+  if (fields.length === 0) return;
   values.push(id);
   db.prepare(`UPDATE stage SET ${fields.join(", ")} WHERE id = ?`).run(...values);
 }
@@ -365,7 +423,7 @@ export function unlockNextStage(planId: string, currentIndex: number): boolean {
   if (!next) return false;
 
   db.prepare(
-    "UPDATE stage SET status = 'active', unlocked_at = datetime('now') WHERE id = ?"
+    "UPDATE stage SET status = 'active', unlocked_at = datetime('now'), outline_status = 'pending' WHERE id = ?"
   ).run(next.id);
 
   db.prepare(
@@ -621,6 +679,11 @@ export function addChatMessage(stageId: string, role: "user" | "assistant", cont
     "INSERT INTO teaching_chat (id, stage_id, role, content) VALUES (?, ?, ?, ?)"
   ).run(id, stageId, role, content);
   return id;
+}
+
+export function clearChatHistory(stageId: string) {
+  const db = getDb();
+  db.prepare("DELETE FROM teaching_chat WHERE stage_id = ?").run(stageId);
 }
 
 export function setCachedSearch(query: string, results: unknown[], source: string, ttlHours: number = 24) {
@@ -1235,4 +1298,487 @@ function parseJsonObj(value: unknown): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+// ==================== Stage Learning Items ====================
+
+export interface StageLearningItem {
+  id: string;
+  stage_id: string;
+  item_type: string;
+  item_key: string;
+  title: string;
+  status: string;
+  metadata: Record<string, unknown>;
+  completed_at: string | null;
+  created_at: string;
+}
+
+export function ensureDefaultLearningItems(stageId: string) {
+  const db = getDb();
+  const defaults: { item_type: string; item_key: string; title: string }[] = [
+    { item_type: "outline_confirm", item_key: "", title: "确认学习大纲" },
+    { item_type: "assessment_pass", item_key: "", title: "通过阶段检测" },
+  ];
+  for (const d of defaults) {
+    const existing = db.prepare(
+      "SELECT id FROM stage_learning_item WHERE stage_id = ? AND item_type = ? AND item_key = ?"
+    ).get(stageId, d.item_type, d.item_key);
+    if (!existing) {
+      db.prepare(
+        `INSERT INTO stage_learning_item (id, stage_id, item_type, item_key, title, status)
+         VALUES (?, ?, ?, ?, ?, 'pending')`
+      ).run(uuidv4(), stageId, d.item_type, d.item_key, d.title);
+    }
+  }
+}
+
+export function getLearningItemsByStage(stageId: string): StageLearningItem[] {
+  const db = getDb();
+  const rows = db.prepare(
+    "SELECT * FROM stage_learning_item WHERE stage_id = ? ORDER BY created_at ASC"
+  ).all(stageId) as Record<string, unknown>[];
+  return rows.map((r) => ({
+    ...r,
+    metadata: parseJsonObj(r.metadata),
+  })) as unknown as StageLearningItem[];
+}
+
+export function upsertLearningItem(
+  stageId: string,
+  itemType: string,
+  itemKey: string,
+  updates: { title?: string; status?: string; metadata?: Record<string, unknown>; completed_at?: string | null }
+): string {
+  const db = getDb();
+  const existing = db.prepare(
+    "SELECT id FROM stage_learning_item WHERE stage_id = ? AND item_type = ? AND item_key = ?"
+  ).get(stageId, itemType, itemKey) as { id: string } | undefined;
+
+  if (existing) {
+    const fields: string[] = [];
+    const values: unknown[] = [];
+    if (updates.title !== undefined) {
+      fields.push("title = ?");
+      values.push(updates.title);
+    }
+    if (updates.status !== undefined) {
+      fields.push("status = ?");
+      values.push(updates.status);
+    }
+    if (updates.metadata !== undefined) {
+      fields.push("metadata = ?");
+      values.push(JSON.stringify(updates.metadata));
+    }
+    if (updates.completed_at !== undefined) {
+      fields.push("completed_at = ?");
+      values.push(updates.completed_at);
+    }
+    if (fields.length > 0) {
+      values.push(existing.id);
+      db.prepare(`UPDATE stage_learning_item SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+    }
+    return existing.id;
+  }
+
+  const id = uuidv4();
+  db.prepare(
+    `INSERT INTO stage_learning_item (id, stage_id, item_type, item_key, title, status, metadata, completed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    id,
+    stageId,
+    itemType,
+    itemKey,
+    updates.title || itemType,
+    updates.status || "pending",
+    JSON.stringify(updates.metadata || {}),
+    updates.completed_at ?? null
+  );
+  return id;
+}
+
+export function getLearningItemById(itemId: string, stageId: string): StageLearningItem | null {
+  const db = getDb();
+  const row = db.prepare(
+    "SELECT * FROM stage_learning_item WHERE id = ? AND stage_id = ?"
+  ).get(itemId, stageId) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    ...row,
+    metadata: parseJsonObj(row.metadata),
+  } as unknown as StageLearningItem;
+}
+
+export function getLearningItem(
+  stageId: string,
+  itemType: string,
+  itemKey: string
+): StageLearningItem | null {
+  const db = getDb();
+  const row = db.prepare(
+    "SELECT * FROM stage_learning_item WHERE stage_id = ? AND item_type = ? AND item_key = ?"
+  ).get(stageId, itemType, itemKey) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    ...row,
+    metadata: parseJsonObj(row.metadata),
+  } as unknown as StageLearningItem;
+}
+
+export function updateLearningItemById(
+  itemId: string,
+  stageId: string,
+  updates: { status?: string; metadata?: Record<string, unknown>; completed_at?: string | null }
+): boolean {
+  const existing = getLearningItemById(itemId, stageId);
+  if (!existing) return false;
+  const db = getDb();
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  if (updates.status !== undefined) {
+    fields.push("status = ?");
+    values.push(updates.status);
+  }
+  if (updates.metadata !== undefined) {
+    fields.push("metadata = ?");
+    values.push(JSON.stringify(updates.metadata));
+  }
+  if (updates.completed_at !== undefined) {
+    fields.push("completed_at = ?");
+    values.push(updates.completed_at);
+  }
+  if (fields.length === 0) return true;
+  values.push(itemId);
+  db.prepare(`UPDATE stage_learning_item SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+  return true;
+}
+
+function fileReadItemKey(filePath: string): string {
+  return filePath.replace(/\\/g, "/").slice(0, 128);
+}
+
+export function syncScenariosFromOutline(stageId: string, scenarios: string[]) {
+  const db = getDb();
+  db.prepare("DELETE FROM stage_scenario WHERE stage_id = ?").run(stageId);
+  scenarios.forEach((title, i) => {
+    db.prepare(
+      `INSERT INTO stage_scenario (id, stage_id, order_index, title, prompt, status)
+       VALUES (?, ?, ?, ?, ?, 'pending')`
+    ).run(uuidv4(), stageId, i, title.slice(0, 200), `请结合本阶段所学，完成场景：${title}`);
+  });
+}
+
+/** Idempotently seed fine-grained progress from a confirmed outline. */
+export function seedProgressFromConfirmedOutline(
+  stageId: string,
+  outline: StageOutline,
+  plan: LearningPlan | null
+) {
+  markLearningItemComplete(stageId, "outline_confirm");
+
+  outline.sections.objectives.forEach((obj, i) => {
+    const existing = getLearningItem(stageId, "objective", String(i));
+    if (!existing) {
+      upsertLearningItem(stageId, "objective", String(i), {
+        title: obj.slice(0, 200),
+        status: "pending",
+      });
+    }
+  });
+
+  syncScenariosFromOutline(stageId, outline.sections.scenarios);
+  outline.sections.scenarios.forEach((sc, i) => {
+    const existing = getLearningItem(stageId, "scenario_complete", String(i));
+    if (!existing) {
+      upsertLearningItem(stageId, "scenario_complete", String(i), {
+        title: `完成场景：${sc.slice(0, 80)}`,
+        status: "pending",
+      });
+    }
+  });
+
+  outline.sections.files_to_read.forEach((f) => {
+    const key = fileReadItemKey(f.path);
+    const existing = getLearningItem(stageId, "file_read", key);
+    if (!existing) {
+      upsertLearningItem(stageId, "file_read", key, {
+        title: `阅读：${f.path}`,
+        status: "pending",
+        metadata: { path: f.path },
+      });
+    }
+  });
+
+  if (plan?.source_type === "code" && outline.sections.architecture_focus.trim()) {
+    const existing = getLearningItem(stageId, "architecture_review", "");
+    if (!existing) {
+      upsertLearningItem(stageId, "architecture_review", "", {
+        title: "架构焦点复习",
+        status: "pending",
+        metadata: { focus: outline.sections.architecture_focus.slice(0, 500) },
+      });
+    }
+  }
+
+  const assessExisting = getLearningItem(stageId, "assessment_pass", "");
+  if (!assessExisting) {
+    upsertLearningItem(stageId, "assessment_pass", "", {
+      title: "通过阶段检测",
+      status: "pending",
+    });
+  }
+}
+
+export function markLearningItemComplete(stageId: string, itemType: string, itemKey: string = "") {
+  upsertLearningItem(stageId, itemType, itemKey, {
+    status: itemType === "assessment_skip" ? "skipped" : "completed",
+    completed_at: new Date().toISOString(),
+  });
+}
+
+export function isManualProgressItemType(itemType: string): boolean {
+  return (["resource_complete", "chat_checkpoint", "objective", "file_read", "architecture_review"] as string[]).includes(itemType);
+}
+
+export function computeStageProgress(stageId: string): {
+  total: number;
+  completed: number;
+  percent: number;
+  items: StageLearningItem[];
+} {
+  const items = getLearningItemsByStage(stageId);
+  const total = items.length;
+  const completed = items.filter((i) => i.status === "completed" || i.status === "skipped").length;
+  return {
+    total,
+    completed,
+    percent: total > 0 ? Math.round((completed / total) * 100) : 0,
+    items,
+  };
+}
+
+// ==================== Stage Scenarios ====================
+
+export interface StageScenario {
+  id: string;
+  stage_id: string;
+  order_index: number;
+  title: string;
+  prompt: string;
+  status: string;
+  user_response: string;
+  conclusion: string;
+  conclusion_evidence: unknown[];
+  completed_at: string | null;
+  created_at: string;
+}
+
+export function seedScenariosFromStage(stageId: string, cases: string[], stageTitle: string) {
+  const db = getDb();
+  const existing = db.prepare("SELECT COUNT(*) as c FROM stage_scenario WHERE stage_id = ?").get(stageId) as { c: number };
+  if (existing.c > 0) return;
+
+  const scenarios = cases.length > 0 ? cases : [`在「${stageTitle}」场景下完成一次结构化分析`];
+  scenarios.forEach((title, i) => {
+    db.prepare(
+      `INSERT INTO stage_scenario (id, stage_id, order_index, title, prompt, status)
+       VALUES (?, ?, ?, ?, ?, 'pending')`
+    ).run(uuidv4(), stageId, i, title.slice(0, 200), `请结合本阶段所学，完成场景：${title}`, "pending");
+    upsertLearningItem(stageId, "scenario_complete", String(i), {
+      title: `完成场景：${title.slice(0, 80)}`,
+      status: "pending",
+    });
+  });
+}
+
+export function getScenariosByStage(stageId: string): StageScenario[] {
+  const db = getDb();
+  const rows = db.prepare(
+    "SELECT * FROM stage_scenario WHERE stage_id = ? ORDER BY order_index ASC"
+  ).all(stageId) as Record<string, unknown>[];
+  return rows.map((r) => ({
+    ...r,
+    conclusion_evidence: parseJsonField(r.conclusion_evidence),
+  })) as unknown as StageScenario[];
+}
+
+export function getScenario(id: string): StageScenario | null {
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM stage_scenario WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    ...row,
+    conclusion_evidence: parseJsonField(row.conclusion_evidence),
+  } as unknown as StageScenario;
+}
+
+const SCENARIO_UPDATE_WHITELIST = new Set([
+  "title", "prompt", "status", "user_response", "conclusion", "conclusion_evidence", "completed_at",
+]);
+
+export function updateScenario(id: string, updates: Partial<StageScenario>) {
+  const db = getDb();
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, value] of Object.entries(updates)) {
+    if (!SCENARIO_UPDATE_WHITELIST.has(key)) continue;
+    if (key === "conclusion_evidence") {
+      fields.push(`${key} = ?`);
+      values.push(JSON.stringify(value || []));
+    } else {
+      fields.push(`${key} = ?`);
+      values.push(value);
+    }
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE stage_scenario SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+}
+
+// ==================== Interview Session / Turn ====================
+
+export interface InterviewSession {
+  id: string;
+  session_key: string;
+  scope_type: string;
+  plan_id: string | null;
+  stage_id: string | null;
+  plan_ids: string[];
+  style: string;
+  countdown_enabled: boolean;
+  countdown_seconds: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InterviewTurn {
+  id: string;
+  session_id: string;
+  turn_index: number;
+  role: string;
+  content: string;
+  is_late: boolean;
+  elapsed_seconds: number | null;
+  answer_deadline_at: string | null;
+  answered_at: string | null;
+  created_at: string;
+}
+
+export function getInterviewSessionByKey(sessionKey: string): InterviewSession | null {
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM interview_session WHERE session_key = ?").get(sessionKey) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    ...row,
+    plan_ids: parseJsonField(row.plan_ids) as string[],
+    countdown_enabled: row.countdown_enabled === 1,
+  } as unknown as InterviewSession;
+}
+
+export function createInterviewSession(session: {
+  session_key: string;
+  scope_type: string;
+  plan_id?: string | null;
+  stage_id?: string | null;
+  plan_ids?: string[];
+  style?: string;
+  countdown_enabled?: boolean;
+  countdown_seconds?: number;
+}): string {
+  const db = getDb();
+  const id = uuidv4();
+  db.prepare(
+    `INSERT INTO interview_session (id, session_key, scope_type, plan_id, stage_id, plan_ids, style, countdown_enabled, countdown_seconds)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    id,
+    session.session_key,
+    session.scope_type,
+    session.plan_id ?? null,
+    session.stage_id ?? null,
+    JSON.stringify(session.plan_ids || []),
+    session.style || "standard",
+    session.countdown_enabled ? 1 : 0,
+    session.countdown_seconds ?? 120
+  );
+  return id;
+}
+
+export function getOrCreateInterviewSession(params: {
+  session_key: string;
+  scope_type: string;
+  plan_id?: string | null;
+  stage_id?: string | null;
+  plan_ids?: string[];
+  style?: string;
+  countdown_enabled?: boolean;
+  countdown_seconds?: number;
+}): InterviewSession {
+  const existing = getInterviewSessionByKey(params.session_key);
+  if (existing) return existing;
+  const id = createInterviewSession(params);
+  return getInterviewSessionByKey(params.session_key)!;
+}
+
+export function getInterviewTurns(sessionId: string): InterviewTurn[] {
+  const db = getDb();
+  return db.prepare(
+    "SELECT * FROM interview_turn WHERE session_id = ? ORDER BY turn_index ASC"
+  ).all(sessionId).map((r) => {
+    const row = r as Record<string, unknown>;
+    return {
+      ...row,
+      is_late: row.is_late === 1,
+      answer_deadline_at: (row.answer_deadline_at as string) || null,
+      answered_at: (row.answered_at as string) || null,
+    };
+  }) as unknown as InterviewTurn[];
+}
+
+export function addInterviewTurn(turn: {
+  session_id: string;
+  turn_index: number;
+  role: string;
+  content: string;
+  is_late?: boolean;
+  elapsed_seconds?: number | null;
+  answer_deadline_at?: string | null;
+  answered_at?: string | null;
+}): string {
+  const db = getDb();
+  const id = uuidv4();
+  db.prepare(
+    `INSERT INTO interview_turn (id, session_id, turn_index, role, content, is_late, elapsed_seconds, answer_deadline_at, answered_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    id,
+    turn.session_id,
+    turn.turn_index,
+    turn.role,
+    turn.content,
+    turn.is_late ? 1 : 0,
+    turn.elapsed_seconds ?? null,
+    turn.answer_deadline_at ?? null,
+    turn.answered_at ?? null
+  );
+  db.prepare("UPDATE interview_session SET updated_at = datetime('now') WHERE id = ?").run(turn.session_id);
+  return id;
+}
+
+export function deleteInterviewSessionByKey(sessionKey: string) {
+  const db = getDb();
+  const session = getInterviewSessionByKey(sessionKey);
+  if (!session) return;
+  db.prepare("DELETE FROM interview_turn WHERE session_id = ?").run(session.id);
+  db.prepare("DELETE FROM interview_session WHERE id = ?").run(session.id);
+}
+
+export function isOutlineConfirmed(stage: Stage): boolean {
+  return stage.outline_status === "confirmed";
+}
+
+export function stageRequiresOutlineConfirmation(stage: Stage): boolean {
+  return stage.outline_status === "pending" || stage.outline_status === "draft";
 }

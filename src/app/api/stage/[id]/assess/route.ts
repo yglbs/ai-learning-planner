@@ -3,6 +3,7 @@ import { getStage, createAssessment, updateStage, unlockNextStage, checkPlanComp
 import { assessLearning, analyzeMastery, generateStageProject, regenerateAssessmentQuestions } from "@/lib/ai";
 import type { AssessmentQuestionInput } from "@/lib/ai";
 import type { Stage } from "@/db/queries";
+import { markAssessmentCheckpoint } from "@/lib/teach-chat-handler";
 
 async function completeStageAndUnlockNext(stage: Stage) {
   updateStage(stage.id, {
@@ -95,6 +96,7 @@ export async function POST(
       });
 
       const hasNext = await completeStageAndUnlockNext(stage);
+      markAssessmentCheckpoint(id, true, true);
 
       return NextResponse.json({
         assessmentId,
@@ -202,6 +204,7 @@ export async function POST(
     }
 
     if (result.passed) {
+      markAssessmentCheckpoint(id, true, false);
       await completeStageAndUnlockNext(stage);
     }
 

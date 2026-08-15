@@ -18,6 +18,12 @@ import {
 } from "@/components/teach-chat";
 import { toast } from "sonner";
 import { MarkdownRenderer } from "@/components/markdown-renderer";
+import { StageOutlineGate } from "@/components/stage-outline-gate";
+import { StageProgressPanel } from "@/components/stage-progress-panel";
+import { StageScenariosPanel } from "@/components/stage-scenarios-panel";
+import { LearningModeSwitcher } from "@/components/learning-mode-switcher";
+import type { LearningMode, OutlineStatus } from "@/lib/learning-types";
+import { defaultLearningMode } from "@/lib/learning-types";
 
 interface Plan {
   id: string;
@@ -28,6 +34,10 @@ interface Plan {
   current_stage_index: number;
   duration_weeks: number;
   daily_hours: number;
+  learning_mode?: LearningMode;
+  career_identity?: string;
+  source_type?: string;
+  source_path?: string | null;
 }
 
 interface PlanSummary {
@@ -50,6 +60,8 @@ interface Stage {
   core_output?: string;
   real_world_cases?: string[];
   summary_text?: string;
+  outline_status?: OutlineStatus;
+  outline_confirmed_at?: string | null;
 }
 
 interface Resource {
@@ -84,7 +96,7 @@ interface StageProject {
   status: string;
 }
 
-type RightPanel = "learn" | "resources" | "project" | "info" | "notes" | "assessments";
+type RightPanel = "learn" | "outline" | "progress" | "scenarios" | "resources" | "project" | "info" | "notes" | "assessments";
 
 interface AssessmentRecord {
   id: string;
@@ -128,6 +140,9 @@ export default function PlanDashboard() {
   const [assessmentHistory, setAssessmentHistory] = useState<AssessmentRecord[]>([]);
   const [expandedAssessmentId, setExpandedAssessmentId] = useState<string | null>(null);
   const [skippingAssess, setSkippingAssess] = useState(false);
+
+  const [outlineStatus, setOutlineStatus] = useState<OutlineStatus | null>(null);
+  const [stageProgressPercent, setStageProgressPercent] = useState(0);
 
   const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState("");
@@ -192,6 +207,32 @@ export default function PlanDashboard() {
   useEffect(() => {
     if (!selectedStageId) return;
     setLoadingResources(true);
+    setOutlineStatus(null);
+    setChatLoadedFor(null);
+    setStageProgressPercent(0);
+
+    fetch(`/api/stage/${selectedStageId}/outline`)
+      .then((r) => r.json())
+      .then((d) => {
+        setOutlineStatus((d.outline_status as OutlineStatus) || "pending");
+        const stage = stages.find((s) => s.id === selectedStageId);
+        if (stage && d.outline_status) {
+          setStages((prev) =>
+            prev.map((s) =>
+              s.id === selectedStageId
+                ? { ...s, outline_status: d.outline_status, outline_confirmed_at: d.outline_confirmed_at }
+                : s
+            )
+          );
+        }
+      })
+      .catch(() => setOutlineStatus("pending"));
+
+    fetch(`/api/stage/${selectedStageId}/progress`)
+      .then((r) => r.json())
+      .then((d) => setStageProgressPercent(d.percent ?? 0))
+      .catch(() => setStageProgressPercent(0));
+
     fetch(`/api/stage/${selectedStageId}/resources`)
       .then((r) => r.json())
       .then(setResources)
@@ -218,6 +259,7 @@ export default function PlanDashboard() {
         setExpandedAssessmentId(null);
       })
       .catch(() => setAssessmentHistory([]));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedStageId]);
 
   useEffect(() => {
@@ -227,23 +269,65 @@ export default function PlanDashboard() {
       .catch(() => {});
   }, [planId]);
 
+  const outlineConfirmed = outlineStatus === "confirmed";
+
   useEffect(() => {
-    if (selectedStageId && rightPanel === "learn" && chatLoadedFor !== selectedStageId) {
+    if (
+      selectedStageId &&
+      rightPanel === "learn" &&
+      outlineConfirmed &&
+      chatLoadedFor !== selectedStageId
+    ) {
       loadChat(selectedStageId);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedStageId, rightPanel]);
+  }, [selectedStageId, rightPanel, outlineConfirmed]);
+
+  async function refreshStageProgress(stageId?: string) {
+    const sid = stageId || selectedStageId;
+    if (!sid) return;
+    try {
+      const res = await fetch(`/api/stage/${sid}/progress`);
+      const data = await res.json();
+      if (res.ok) setStageProgressPercent(data.percent ?? 0);
+    } catch {
+      /* ignore */
+    }
+  }
 
   async function loadChat(stageId: string) {
     try {
+      const outlineRes = await fetch(`/api/stage/${stageId}/outline`);
+      const outlineData = await outlineRes.json().catch(() => ({}));
+      const status = (outlineData.outline_status as OutlineStatus) || "pending";
+      setOutlineStatus(status);
+      if (status !== "confirmed") {
+        setChatLoadedFor(null);
+        return;
+      }
+
       const res = await fetch(`/api/stage/${stageId}/chat`);
       const data = await res.json();
-      setChatMessages(data);
+      setChatMessages(Array.isArray(data) ? data : []);
       setChatLoadedFor(stageId);
-      if (data.length === 0) {
+      if (Array.isArray(data) && data.length === 0) {
         await sendChatMessage("开始学习", stageId);
       }
     } catch { /* ignore */ }
+  }
+
+  async function handleOutlineConfirmed() {
+    setOutlineStatus("confirmed");
+    setStages((prev) =>
+      prev.map((s) =>
+        s.id === selectedStageId
+          ? { ...s, outline_status: "confirmed", outline_confirmed_at: new Date().toISOString() }
+          : s
+      )
+    );
+    setChatLoadedFor(null);
+    setRightPanel("learn");
+    await refreshStageProgress();
   }
 
   async function sendChatMessage(text: string, stageId?: string) {
@@ -258,6 +342,14 @@ export default function PlanDashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text }),
       });
+      if (res.status === 403) {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.error || "请先确认学习大纲");
+        setOutlineStatus("draft");
+        setRightPanel("outline");
+        setChatMessages((prev) => prev.slice(0, -1));
+        return;
+      }
       if (!res.ok) throw new Error("发送失败");
       const data = await res.json();
       setChatMessages((prev) => [...prev, { role: "assistant", content: data.content }]);
@@ -305,6 +397,7 @@ export default function PlanDashboard() {
       const data = await res.json();
       toast.success(data.hasNext ? "已跳过检测，下一阶段已解锁" : "已跳过检测，全部阶段已完成");
       await loadData();
+      await refreshStageProgress();
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -541,6 +634,22 @@ export default function PlanDashboard() {
           >
             🎙️ 模拟面试
           </button>
+          {plan.source_type === "code" && (
+            <button
+              className="w-full text-left px-3 py-2 rounded-lg text-xs text-white/50 hover:text-white/80 hover:bg-white/5 transition-all"
+              onClick={() => router.push(`/plan/${planId}/architecture`)}
+            >
+              🏗️ 服务架构
+            </button>
+          )}
+          {allPlans.length >= 2 && (
+            <button
+              className="w-full text-left px-3 py-2 rounded-lg text-xs text-white/50 hover:text-white/80 hover:bg-white/5 transition-all"
+              onClick={() => router.push("/interview/multi")}
+            >
+              🎙️ 跨计划面试
+            </button>
+          )}
 
           <div className="h-px bg-white/5 my-2" />
           <button
@@ -566,7 +675,7 @@ export default function PlanDashboard() {
             <div className="shrink-0 border-b border-border/20 px-8 py-5">
               <div className="flex items-start justify-between mb-3">
                 <div>
-                  <div className="flex items-center gap-2 mb-1">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
                     <Badge variant="secondary" className="text-[10px] px-2 py-0.5 bg-primary/10 text-primary">
                       第 {selectedStage.order_index + 1} 阶段
                     </Badge>
@@ -575,8 +684,24 @@ export default function PlanDashboard() {
                     }`}>
                       {selectedStage.status === "completed" ? "已完成" : "进行中"}
                     </Badge>
+                    {!outlineConfirmed && (
+                      <Badge variant="secondary" className="text-[10px] px-2 py-0.5 bg-amber-500/10 text-amber-400">
+                        待确认大纲
+                      </Badge>
+                    )}
+                    <div className="flex items-center gap-1.5 min-w-[100px]">
+                      <Progress value={stageProgressPercent} className="h-1.5 w-20" />
+                      <span className="text-[10px] text-muted-foreground">{stageProgressPercent}%</span>
+                    </div>
                   </div>
                   <h2 className="text-xl font-bold">{selectedStage.title}</h2>
+                  <div className="mt-2">
+                    <LearningModeSwitcher
+                      planId={plan.id}
+                      value={plan.learning_mode || defaultLearningMode(plan.source_type || "goal")}
+                      onChange={(mode) => setPlan((p) => (p ? { ...p, learning_mode: mode } : p))}
+                    />
+                  </div>
                 </div>
 
                 {(selectedStage.status === "active" || selectedStage.status === "completed") && (
@@ -608,6 +733,9 @@ export default function PlanDashboard() {
               <div className="flex gap-1 flex-wrap">
                 {([
                   { key: "learn" as RightPanel, label: "💬 AI 教学" },
+                  { key: "outline" as RightPanel, label: "📋 大纲" },
+                  { key: "progress" as RightPanel, label: `📈 进度 (${stageProgressPercent}%)` },
+                  { key: "scenarios" as RightPanel, label: "🎬 场景" },
                   { key: "resources" as RightPanel, label: `📚 资料 (${resources.length})` },
                   { key: "project" as RightPanel, label: `🛠️ 实战项目` },
                   { key: "notes" as RightPanel, label: "📝 阶段笔记" },
@@ -646,6 +774,13 @@ export default function PlanDashboard() {
             <div className="flex-1 overflow-hidden">
               {/* AI 教学面板 */}
               {rightPanel === "learn" && (
+                !outlineConfirmed ? (
+                  <StageOutlineGate
+                    stageId={selectedStageId!}
+                    sourceType={plan.source_type}
+                    onConfirmed={handleOutlineConfirmed}
+                  />
+                ) : (
                 <div className="h-full flex flex-col relative">
                   <TeachChatBackdrop bgId={bgId} customUrl={customUrl} />
 
@@ -670,6 +805,31 @@ export default function PlanDashboard() {
                         }}
                         onClearCustom={clearCustomBackground}
                       />
+                      {outlineConfirmed && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="rounded-lg text-xs shrink-0 h-8 text-muted-foreground"
+                          disabled={chatSending || !selectedStageId}
+                          onClick={async () => {
+                            if (!selectedStageId) return;
+                            if (!confirm("清空本阶段教学对话，并按当前模式/职级重新开聊？")) return;
+                            try {
+                              const res = await fetch(`/api/stage/${selectedStageId}/chat`, { method: "DELETE" });
+                              if (!res.ok) throw new Error("清空失败");
+                              setChatMessages([]);
+                              setChatLoadedFor(null);
+                              await sendChatMessage("开始学习", selectedStageId);
+                              setChatLoadedFor(selectedStageId);
+                              toast.success("已按当前画像重新开聊");
+                            } catch (e) {
+                              toast.error((e as Error).message);
+                            }
+                          }}
+                        >
+                          重新开聊
+                        </Button>
+                      )}
                       {selectedStage.status === "active" && visibleMessages.length >= 2 && (
                         <Button
                           size="sm"
@@ -784,6 +944,29 @@ export default function PlanDashboard() {
                     </div>
                   </div>
                 </div>
+                )
+              )}
+
+              {rightPanel === "outline" && selectedStageId && (
+                <StageOutlineGate
+                  stageId={selectedStageId}
+                  sourceType={plan.source_type}
+                  onConfirmed={handleOutlineConfirmed}
+                />
+              )}
+
+              {rightPanel === "progress" && selectedStageId && (
+                <StageProgressPanel
+                  stageId={selectedStageId}
+                  onPercentChange={setStageProgressPercent}
+                />
+              )}
+
+              {rightPanel === "scenarios" && selectedStageId && (
+                <StageScenariosPanel
+                  stageId={selectedStageId}
+                  onCompleted={() => refreshStageProgress()}
+                />
               )}
 
               {/* 资料面板 */}

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { generatePlanFromCode, extractConcepts, generateStageProject } from "@/lib/ai";
+import { parseLearningMode, parseCareerIdentity } from "@/lib/learning-types";
 import {
   createPlan, createStage, updatePlan,
   createConcept, createRelation, createStageProject, getStagesByPlan,
@@ -24,7 +25,12 @@ export async function POST(request: Request) {
       motivation = "",
       background = "",
       expected_outcome = "",
+      learning_mode,
+      career_identity,
     } = body;
+
+    const resolvedMode = parseLearningMode(learning_mode, "business_through_tech");
+    const resolvedCareer = parseCareerIdentity(career_identity);
 
     if (!project_path?.trim()) {
       return NextResponse.json({ error: "请输入项目路径" }, { status: 400 });
@@ -81,6 +87,8 @@ export async function POST(request: Request) {
       motivation,
       background,
       expected_outcome,
+      learning_mode: resolvedMode,
+      career_identity: resolvedCareer,
     });
 
     const goalDesc = `深入学习项目「${projectName}」的代码实现（源码路径: ${resolvedPath}）`;
@@ -98,6 +106,8 @@ export async function POST(request: Request) {
       source_path: resolvedPath,
       source_file_tree: fileTree,
       source_files: files.map((f) => f.relativePath),
+      learning_mode: resolvedMode,
+      career_identity: resolvedCareer,
     });
 
     updatePlan(planId, {

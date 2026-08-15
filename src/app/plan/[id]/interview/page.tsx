@@ -7,10 +7,18 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { MarkdownRenderer } from "@/components/markdown-renderer";
+import {
+  InterviewCountdownBar,
+  InterviewCountdownToggle,
+  InterviewLateBanner,
+  buildCountdownRequestFields,
+  DEFAULT_COUNTDOWN_SECONDS,
+} from "@/components/interview-countdown";
 
 interface ChatMsg {
   role: string;
   content: string;
+  answer_deadline_at?: string | null;
 }
 
 type InterviewStyle = "friendly" | "standard" | "tough";
@@ -31,6 +39,11 @@ export default function InterviewPage() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [planTitle, setPlanTitle] = useState("");
+  const [countdownEnabled, setCountdownEnabled] = useState(false);
+  const [countdownSeconds, setCountdownSeconds] = useState(DEFAULT_COUNTDOWN_SECONDS);
+  const [answerDeadlineAt, setAnswerDeadlineAt] = useState<string | null>(null);
+  const [serverNow, setServerNow] = useState<string | null>(null);
+  const [isLate, setIsLate] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -48,7 +61,15 @@ export default function InterviewPage() {
     try {
       const res = await fetch(`/api/plan/${planId}/interview?style=${s}`);
       const data = await res.json();
-      setMessages(Array.isArray(data) ? data : []);
+      const history = Array.isArray(data) ? data : Array.isArray(data?.history) ? data.history : [];
+      setMessages(history);
+      const lastAssistant = [...history].reverse().find((m: ChatMsg) => m.role === "assistant" && m.answer_deadline_at);
+      if (lastAssistant?.answer_deadline_at) {
+        setAnswerDeadlineAt(lastAssistant.answer_deadline_at);
+      }
+      if (data?.server_now) setServerNow(data.server_now);
+      if (typeof data?.countdown_enabled === "boolean") setCountdownEnabled(data.countdown_enabled);
+      if (typeof data?.countdown_seconds === "number") setCountdownSeconds(data.countdown_seconds);
     } catch {
       setMessages([]);
     }
@@ -62,29 +83,51 @@ export default function InterviewPage() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  function applyReplyMeta(reply: {
+    answer_deadline_at?: string | null;
+    server_now?: string;
+    is_late?: boolean;
+    countdown_enabled?: boolean;
+    countdown_seconds?: number;
+  }) {
+    if (reply.answer_deadline_at !== undefined) setAnswerDeadlineAt(reply.answer_deadline_at || null);
+    if (reply.server_now) setServerNow(reply.server_now);
+    if (typeof reply.is_late === "boolean") setIsLate(reply.is_late);
+    if (typeof reply.countdown_enabled === "boolean") setCountdownEnabled(reply.countdown_enabled);
+    if (typeof reply.countdown_seconds === "number") setCountdownSeconds(reply.countdown_seconds);
+  }
+
   async function startInterview(s: InterviewStyle) {
     setStyle(s);
     setSending(true);
+    setIsLate(false);
     try {
       const res = await fetch(`/api/plan/${planId}/interview?style=${s}`);
       const data = await res.json().catch(() => null);
-      const history = Array.isArray(data) ? data : [];
+      const history = Array.isArray(data) ? data : Array.isArray(data?.history) ? data.history : [];
 
       if (history.length === 0) {
+        const countdown = buildCountdownRequestFields({
+          enabled: countdownEnabled,
+          seconds: countdownSeconds,
+        });
         const chatRes = await fetch(`/api/plan/${planId}/interview`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: "开始面试", style: s }),
+          body: JSON.stringify({ message: "开始面试", style: s, ...countdown }),
         });
         const reply = await chatRes.json().catch(() => ({}));
         if (!chatRes.ok) throw new Error(reply.error || "开始失败，请稍后重试");
         if (!reply.content) throw new Error("面试官未返回内容，请检查 API 配置");
+        applyReplyMeta(reply);
         setMessages([
           { role: "user", content: "开始面试" },
-          { role: "assistant", content: reply.content },
+          { role: "assistant", content: reply.content, answer_deadline_at: reply.answer_deadline_at },
         ]);
       } else {
         setMessages(history);
+        const lastAssistant = [...history].reverse().find((m: ChatMsg) => m.role === "assistant" && m.answer_deadline_at);
+        if (lastAssistant?.answer_deadline_at) setAnswerDeadlineAt(lastAssistant.answer_deadline_at);
       }
     } catch (e) {
       toast.error((e as Error).message);
@@ -103,17 +146,27 @@ export default function InterviewPage() {
     setSending(true);
 
     try {
+      const countdown = buildCountdownRequestFields({
+        enabled: countdownEnabled,
+        seconds: countdownSeconds,
+        answerDeadlineAt,
+        serverNow,
+      });
       const res = await fetch(`/api/plan/${planId}/interview`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: msg, style }),
+        body: JSON.stringify({ message: msg, style, ...countdown }),
       });
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.error || "发送失败");
       }
       const reply = await res.json();
-      setMessages((prev) => [...prev, { role: "assistant", content: reply.content }]);
+      applyReplyMeta(reply);
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: reply.content, answer_deadline_at: reply.answer_deadline_at },
+      ]);
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -128,6 +181,8 @@ export default function InterviewPage() {
       await fetch(`/api/plan/${planId}/interview?style=${style}`, { method: "DELETE" });
       setMessages([]);
       setStyle(null);
+      setAnswerDeadlineAt(null);
+      setIsLate(false);
       toast.success("面试已重置");
     } catch {
       toast.error("重置失败");
@@ -161,6 +216,13 @@ export default function InterviewPage() {
                 基于你学习的「{planTitle || "..."}」内容，AI 面试官将对你进行技术面试
               </p>
             </div>
+
+            <InterviewCountdownToggle
+              enabled={countdownEnabled}
+              seconds={countdownSeconds}
+              onEnabledChange={setCountdownEnabled}
+              onSecondsChange={setCountdownSeconds}
+            />
 
             <div className="space-y-4">
               <p className="text-sm text-muted-foreground text-center">选择面试官风格</p>
@@ -205,6 +267,12 @@ export default function InterviewPage() {
               {planTitle}
             </Badge>
           </div>
+          <InterviewCountdownBar
+            answerDeadlineAt={answerDeadlineAt}
+            serverNow={serverNow}
+            enabled={countdownEnabled}
+            totalSeconds={countdownSeconds}
+          />
           <div className="flex items-center gap-2 shrink-0">
             <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => { setStyle(null); }}>
               换风格
@@ -218,6 +286,7 @@ export default function InterviewPage() {
 
       <main className="flex-1 overflow-y-auto px-6 py-6">
         <div className="max-w-3xl mx-auto space-y-4">
+          <InterviewLateBanner isLate={isLate} />
           {messages.filter(m => m.content !== "开始面试").map((msg, i) => (
             <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
               <div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap ${
@@ -260,29 +329,36 @@ export default function InterviewPage() {
       </main>
 
       <footer className="border-t border-border/40 px-6 py-4 bg-card/40 backdrop-blur-md shrink-0">
-        <div className="max-w-3xl mx-auto flex gap-3">
-          <Textarea
-            ref={inputRef}
-            placeholder="输入你的回答..."
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            rows={2}
-            className="flex-1 rounded-xl bg-background/50 border-border/40 focus:border-primary/50 resize-none text-sm"
-            disabled={sending}
-          />
-          <Button
-            className="h-auto rounded-xl px-6 shrink-0"
-            onClick={handleSend}
-            disabled={!input.trim() || sending}
-          >
-            发送
-          </Button>
+        <div className="max-w-3xl mx-auto space-y-2">
+          <div className="flex gap-3">
+            <Textarea
+              ref={inputRef}
+              placeholder="输入你的回答..."
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              rows={2}
+              className="flex-1 rounded-xl bg-background/50 border-border/40 focus:border-primary/50 resize-none text-sm"
+              disabled={sending}
+            />
+            <Button
+              className="h-auto rounded-xl px-6 shrink-0"
+              onClick={handleSend}
+              disabled={!input.trim() || sending}
+            >
+              发送
+            </Button>
+          </div>
+          {countdownEnabled && (
+            <p className="text-[10px] text-muted-foreground/60 text-center">
+              倒计时以服务器收到回答的时间为准
+            </p>
+          )}
         </div>
       </footer>
     </div>

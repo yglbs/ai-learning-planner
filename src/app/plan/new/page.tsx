@@ -11,6 +11,8 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { PLAN_TEMPLATES } from "@/config/templates";
+import type { CareerIdentity, LearningMode } from "@/lib/learning-types";
+import { defaultLearningMode } from "@/lib/learning-types";
 
 type Step = "template" | "book" | "code" | "customize" | "dialogue" | "generating" | "preview";
 
@@ -82,6 +84,8 @@ export default function NewPlanPage() {
   const [weeks, setWeeks] = useState(6);
   const [hours, setHours] = useState([2]);
   const [level, setLevel] = useState("beginner");
+  const [learningMode, setLearningMode] = useState<LearningMode>("business");
+  const [careerIdentity, setCareerIdentity] = useState<CareerIdentity>("");
 
   const [dialogueAnswers, setDialogueAnswers] = useState<Record<string, string>>({
     motivation: "",
@@ -148,6 +152,8 @@ export default function NewPlanPage() {
             duration_weeks: weeks,
             daily_hours: hours[0],
             skill_level: level,
+            learning_mode: learningMode,
+            career_identity: careerIdentity,
             motivation: dialogueAnswers.motivation,
             background: dialogueAnswers.background,
             expected_outcome: dialogueAnswers.outcome,
@@ -159,6 +165,8 @@ export default function NewPlanPage() {
         formData.append("duration_weeks", String(weeks));
         formData.append("daily_hours", String(hours[0]));
         formData.append("skill_level", level);
+        formData.append("learning_mode", learningMode);
+        formData.append("career_identity", careerIdentity);
         formData.append("motivation", dialogueAnswers.motivation || "");
         formData.append("background", dialogueAnswers.background || "");
         formData.append("expected_outcome", dialogueAnswers.outcome || "");
@@ -176,6 +184,8 @@ export default function NewPlanPage() {
             duration_weeks: weeks,
             daily_hours: hours[0],
             skill_level: level,
+            learning_mode: learningMode,
+            career_identity: careerIdentity,
             motivation: dialogueAnswers.motivation,
             background: dialogueAnswers.background,
             expected_outcome: dialogueAnswers.outcome,
@@ -296,7 +306,10 @@ export default function NewPlanPage() {
               <div className="flex gap-3 pt-2">
                 <Button
                   className="flex-1 h-12 rounded-xl glow-primary font-medium"
-                  onClick={() => setStep("customize")}
+                  onClick={() => {
+                    setLearningMode(defaultLearningMode("goal"));
+                    setStep("customize");
+                  }}
                   disabled={!selectedTemplate}
                 >
                   使用模板 →
@@ -307,6 +320,7 @@ export default function NewPlanPage() {
                   onClick={() => {
                     setSelectedTemplate(null);
                     setGoal("");
+                    setLearningMode(defaultLearningMode("goal"));
                     setStep("customize");
                   }}
                 >
@@ -318,6 +332,9 @@ export default function NewPlanPage() {
                   onClick={() => {
                     setSelectedTemplate(null);
                     setUploadedFile(null);
+                    setProjectPath("");
+                    setProjectValidated(false);
+                    setLearningMode(defaultLearningMode("book"));
                     setStep("book");
                   }}
                 >
@@ -328,8 +345,10 @@ export default function NewPlanPage() {
                   className="h-12 rounded-xl border-border/50 px-6"
                   onClick={() => {
                     setSelectedTemplate(null);
+                    setUploadedFile(null);
                     setProjectPath("");
                     setProjectValidated(false);
+                    setLearningMode(defaultLearningMode("code"));
                     setStep("code");
                   }}
                 >
@@ -546,12 +565,15 @@ export default function NewPlanPage() {
               </div>
 
               <div className="flex gap-3 pt-2">
-                <Button variant="outline" onClick={() => { setProjectPath(""); setProjectValidated(false); setStep("template"); }} className="h-12 rounded-xl border-border/50 px-6">
+                <Button variant="outline" onClick={() => { setProjectPath(""); setProjectValidated(false); setLearningMode(defaultLearningMode("goal")); setStep("template"); }} className="h-12 rounded-xl border-border/50 px-6">
                   ← 返回
                 </Button>
                 <Button
                   className="flex-1 h-12 rounded-xl glow-primary font-medium"
-                  onClick={() => setStep("customize")}
+                  onClick={() => {
+                    setLearningMode(defaultLearningMode("code"));
+                    setStep("customize");
+                  }}
                   disabled={!projectValidated}
                 >
                   下一步：设置参数 →
@@ -577,7 +599,7 @@ export default function NewPlanPage() {
                       <span className="text-base">💻</span>
                       <span className="text-sm font-medium text-green-400 font-mono truncate">{projectPath}</span>
                       <button
-                        onClick={() => { setProjectPath(""); setProjectValidated(false); setGoal(""); setStep("code"); }}
+                        onClick={() => { setProjectPath(""); setProjectValidated(false); setGoal(""); setLearningMode(defaultLearningMode("code")); setStep("code"); }}
                         className="ml-auto text-xs text-muted-foreground hover:text-foreground shrink-0"
                       >
                         更换
@@ -687,6 +709,68 @@ export default function NewPlanPage() {
                       >
                         <RadioGroupItem value={item.value} id={`level-${item.value}`} className="sr-only" />
                         <span>{item.icon}</span>
+                        <span className="text-sm font-medium">{item.label}</span>
+                      </label>
+                    ))}
+                  </RadioGroup>
+                </div>
+
+                <div className="space-y-3">
+                  <Label className="text-base font-medium flex items-center gap-2">
+                    <span className="text-lg">🧭</span> 学习模式
+                  </Label>
+                  <RadioGroup
+                    value={learningMode}
+                    onValueChange={(v) => setLearningMode(v as LearningMode)}
+                    className="grid grid-cols-1 sm:grid-cols-3 gap-3"
+                  >
+                    {[
+                      { value: "business" as LearningMode, label: "业务视角", desc: "关注价值与决策" },
+                      { value: "technical" as LearningMode, label: "技术深入", desc: "机制与实现细节" },
+                      { value: "business_through_tech" as LearningMode, label: "业务×技术", desc: "用代码理解业务" },
+                    ].map((item) => (
+                      <label
+                        key={item.value}
+                        className={`flex flex-col gap-1 p-3.5 rounded-xl border cursor-pointer transition-all ${
+                          learningMode === item.value
+                            ? "border-primary/50 bg-primary/5"
+                            : "border-border/40 hover:border-border/60"
+                        }`}
+                      >
+                        <RadioGroupItem value={item.value} className="sr-only" />
+                        <span className={`text-sm font-medium ${learningMode === item.value ? "text-primary" : ""}`}>
+                          {item.label}
+                        </span>
+                        <span className="text-xs text-muted-foreground/70">{item.desc}</span>
+                      </label>
+                    ))}
+                  </RadioGroup>
+                </div>
+
+                <div className="space-y-3">
+                  <Label className="text-base font-medium flex items-center gap-2">
+                    <span className="text-lg">👔</span> 职业身份
+                  </Label>
+                  <RadioGroup
+                    value={careerIdentity || "none"}
+                    onValueChange={(v) => setCareerIdentity((v === "none" ? "" : v) as CareerIdentity)}
+                    className="grid grid-cols-2 sm:grid-cols-4 gap-3"
+                  >
+                    {[
+                      { value: "none", label: "不指定" },
+                      { value: "junior", label: "初级" },
+                      { value: "senior", label: "高级" },
+                      { value: "staff", label: "资深" },
+                    ].map((item) => (
+                      <label
+                        key={item.value}
+                        className={`flex items-center justify-center h-11 rounded-xl border cursor-pointer transition-all ${
+                          (careerIdentity || "none") === item.value
+                            ? "border-primary/50 bg-primary/5 text-primary"
+                            : "border-border/40 hover:border-border/60"
+                        }`}
+                      >
+                        <RadioGroupItem value={item.value} className="sr-only" />
                         <span className="text-sm font-medium">{item.label}</span>
                       </label>
                     ))}

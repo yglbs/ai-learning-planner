@@ -1,12 +1,20 @@
 import { NextResponse } from "next/server";
 import { generatePlan, extractConcepts, generateStageProject } from "@/lib/ai";
+import { parseLearningMode, parseCareerIdentity } from "@/lib/learning-types";
 import { createPlan, createStage, createResource, updatePlan, getConfig, createConcept, createRelation, createStageProject } from "@/db/queries";
 import { searchTavily } from "@/lib/datasource";
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { goal, duration_weeks, daily_hours, skill_level, constraints, motivation, background, expected_outcome } = body;
+    const {
+      goal, duration_weeks, daily_hours, skill_level, constraints,
+      motivation, background, expected_outcome,
+      learning_mode, career_identity,
+    } = body;
+
+    const resolvedMode = parseLearningMode(learning_mode, "business");
+    const resolvedCareer = parseCareerIdentity(career_identity);
 
     const generated = await generatePlan({
       goal,
@@ -17,6 +25,8 @@ export async function POST(request: Request) {
       motivation,
       background,
       expected_outcome,
+      learning_mode: resolvedMode,
+      career_identity: resolvedCareer,
     });
 
     const planId = createPlan({
@@ -28,6 +38,8 @@ export async function POST(request: Request) {
       user_motivation: motivation || "",
       user_background: background || "",
       expected_outcome: expected_outcome || "",
+      learning_mode: resolvedMode,
+      career_identity: resolvedCareer,
     });
 
     updatePlan(planId, {

@@ -356,4 +356,121 @@ function runMigrations(db: Database.Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_stage_note_stage ON stage_note(stage_id);
   `);
+
+  // --- Schema v3: learning mode, outlines, progress, interview sessions ---
+  safeAddColumn(db, "learning_plan", "learning_mode", "TEXT DEFAULT 'business'");
+  safeAddColumn(db, "learning_plan", "career_identity", "TEXT DEFAULT ''");
+  safeAddColumn(db, "learning_plan", "architecture_snapshot", "TEXT DEFAULT ''");
+  safeAddColumn(db, "learning_plan", "architecture_generated_at", "TEXT");
+
+  safeAddColumn(db, "stage", "outline_status", "TEXT DEFAULT 'confirmed'");
+  safeAddColumn(db, "stage", "outline_json", "TEXT DEFAULT ''");
+  safeAddColumn(db, "stage", "outline_confirmed_at", "TEXT");
+  safeAddColumn(db, "stage", "learning_started_at", "TEXT");
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS stage_learning_item (
+      id TEXT PRIMARY KEY,
+      stage_id TEXT NOT NULL,
+      item_type TEXT NOT NULL,
+      item_key TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      metadata TEXT NOT NULL DEFAULT '{}',
+      completed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (stage_id) REFERENCES stage(id) ON DELETE CASCADE,
+      UNIQUE(stage_id, item_type, item_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_learning_item_stage ON stage_learning_item(stage_id);
+
+    CREATE TABLE IF NOT EXISTS stage_scenario (
+      id TEXT PRIMARY KEY,
+      stage_id TEXT NOT NULL,
+      order_index INTEGER NOT NULL DEFAULT 0,
+      title TEXT NOT NULL,
+      prompt TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      user_response TEXT DEFAULT '',
+      conclusion TEXT DEFAULT '',
+      conclusion_evidence TEXT NOT NULL DEFAULT '[]',
+      completed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (stage_id) REFERENCES stage(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_scenario_stage ON stage_scenario(stage_id);
+
+    CREATE TABLE IF NOT EXISTS interview_session (
+      id TEXT PRIMARY KEY,
+      session_key TEXT NOT NULL UNIQUE,
+      scope_type TEXT NOT NULL DEFAULT 'stage',
+      plan_id TEXT,
+      stage_id TEXT,
+      plan_ids TEXT NOT NULL DEFAULT '[]',
+      style TEXT NOT NULL DEFAULT 'standard',
+      countdown_enabled INTEGER NOT NULL DEFAULT 0,
+      countdown_seconds INTEGER NOT NULL DEFAULT 120,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_interview_session_key ON interview_session(session_key);
+
+    CREATE TABLE IF NOT EXISTS interview_turn (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      turn_index INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      is_late INTEGER NOT NULL DEFAULT 0,
+      elapsed_seconds REAL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (session_id) REFERENCES interview_session(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_interview_turn_session ON interview_turn(session_id);
+  `);
+
+  safeAddColumn(db, "interview_turn", "answer_deadline_at", "TEXT");
+  safeAddColumn(db, "interview_turn", "answered_at", "TEXT");
+
+  migrateSchemaV3Backfill(db);
+}
+
+function migrateSchemaV3Backfill(db: Database.Database) {
+  const row = db.prepare("SELECT schema_version FROM system_config WHERE id = 1").get() as
+    | { schema_version: number }
+    | undefined;
+  const currentVersion = row?.schema_version ?? 2;
+  if (currentVersion >= 3) return;
+
+  db.transaction(() => {
+    // Code plans default to business_through_tech
+    db.prepare(
+      `UPDATE learning_plan SET learning_mode = 'business_through_tech'
+       WHERE source_type = 'code' AND (learning_mode IS NULL OR learning_mode = 'business' OR learning_mode = '')`
+    ).run();
+
+    // Backfill outline_status for legacy stages
+    const stages = db.prepare("SELECT id, status FROM stage").all() as { id: string; status: string }[];
+    for (const stage of stages) {
+      let outlineStatus = "confirmed";
+      if (stage.status === "completed") {
+        outlineStatus = "confirmed";
+      } else {
+        const chatCount = db
+          .prepare("SELECT COUNT(*) as c FROM teaching_chat WHERE stage_id = ?")
+          .get(stage.id) as { c: number };
+        if (chatCount.c > 0) {
+          outlineStatus = "confirmed";
+        }
+        // Pre-existing active with no chat: remain confirmed (legacy usability)
+      }
+      db.prepare("UPDATE stage SET outline_status = ? WHERE id = ? AND (outline_status IS NULL OR outline_status = '')").run(
+        outlineStatus,
+        stage.id
+      );
+    }
+
+    db.prepare("UPDATE system_config SET schema_version = 3, updated_at = datetime('now') WHERE id = 1").run();
+  })();
 }

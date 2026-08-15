@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { generatePlanFromBook, extractConcepts, generateStageProject } from "@/lib/ai";
+import { parseLearningMode, parseCareerIdentity } from "@/lib/learning-types";
 import { createPlan, createStage, updatePlan, getConfig, createConcept, createRelation, createStageProject, getStagesByPlan } from "@/db/queries";
 import { PDFParse } from "pdf-parse";
 
@@ -15,6 +16,11 @@ export async function POST(request: Request) {
     const motivation = formData.get("motivation") as string || "";
     const background = formData.get("background") as string || "";
     const expected_outcome = formData.get("expected_outcome") as string || "";
+    const learning_mode = formData.get("learning_mode") as string | null;
+    const career_identity = formData.get("career_identity") as string | null;
+
+    const resolvedMode = parseLearningMode(learning_mode, "business");
+    const resolvedCareer = parseCareerIdentity(career_identity);
 
     if (!file) {
       return NextResponse.json({ error: "请上传文件" }, { status: 400 });
@@ -60,6 +66,8 @@ export async function POST(request: Request) {
       motivation,
       background,
       expected_outcome,
+      learning_mode: resolvedMode,
+      career_identity: resolvedCareer,
     });
 
     const planId = createPlan({
@@ -71,6 +79,8 @@ export async function POST(request: Request) {
       user_motivation: motivation,
       user_background: background,
       expected_outcome,
+      learning_mode: resolvedMode,
+      career_identity: resolvedCareer,
     });
 
     updatePlan(planId, {
