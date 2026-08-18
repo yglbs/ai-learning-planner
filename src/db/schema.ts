@@ -433,7 +433,35 @@ function runMigrations(db: Database.Database) {
   safeAddColumn(db, "interview_turn", "answer_deadline_at", "TEXT");
   safeAddColumn(db, "interview_turn", "answered_at", "TEXT");
 
+  // --- Schema v4: post-stage review, validator model, timed fail ---
+  safeAddColumn(db, "system_config", "validator_enabled", "INTEGER DEFAULT 1");
+  safeAddColumn(db, "system_config", "validator_llm_provider", "TEXT DEFAULT ''");
+  safeAddColumn(db, "system_config", "validator_llm_api_key", "TEXT DEFAULT ''");
+  safeAddColumn(db, "system_config", "validator_llm_base_url", "TEXT DEFAULT ''");
+  safeAddColumn(db, "system_config", "validator_llm_model", "TEXT DEFAULT ''");
+  safeAddColumn(db, "system_config", "default_post_stage_review_enabled", "INTEGER DEFAULT 1");
+  safeAddColumn(db, "system_config", "default_answer_time_limit_enabled", "INTEGER DEFAULT 1");
+  safeAddColumn(db, "system_config", "default_answer_time_limit_seconds", "INTEGER DEFAULT 120");
+
+  safeAddColumn(db, "learning_plan", "post_stage_review_enabled", "INTEGER DEFAULT 1");
+  safeAddColumn(db, "learning_plan", "answer_time_limit_enabled", "INTEGER DEFAULT 1");
+  safeAddColumn(db, "learning_plan", "answer_time_limit_seconds", "INTEGER DEFAULT 120");
+
+  safeAddColumn(db, "stage", "post_review_status", "TEXT DEFAULT 'none'");
+
+  safeAddColumn(db, "review_schedule", "review_kind", "TEXT DEFAULT 'spaced'");
+
+  safeAddColumn(db, "assessment", "validator_score_overall", "REAL");
+  safeAddColumn(db, "assessment", "validator_passed", "INTEGER");
+  safeAddColumn(db, "assessment", "validator_feedback", "TEXT DEFAULT ''");
+  safeAddColumn(db, "assessment", "cross_check_agreed", "INTEGER");
+  safeAddColumn(db, "assessment", "timed_out", "INTEGER DEFAULT 0");
+  safeAddColumn(db, "assessment", "elapsed_seconds", "REAL");
+
+  safeAddColumn(db, "interview_session", "fail_on_timeout", "INTEGER DEFAULT 0");
+
   migrateSchemaV3Backfill(db);
+  migrateSchemaV4Defaults(db);
 }
 
 function migrateSchemaV3Backfill(db: Database.Database) {
@@ -472,5 +500,31 @@ function migrateSchemaV3Backfill(db: Database.Database) {
     }
 
     db.prepare("UPDATE system_config SET schema_version = 3, updated_at = datetime('now') WHERE id = 1").run();
+  })();
+}
+
+function migrateSchemaV4Defaults(db: Database.Database) {
+  const row = db.prepare("SELECT schema_version FROM system_config WHERE id = 1").get() as
+    | { schema_version: number }
+    | undefined;
+  const currentVersion = row?.schema_version ?? 2;
+  if (currentVersion >= 4) return;
+
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE system_config SET
+        validator_enabled = 1,
+        default_post_stage_review_enabled = 1,
+        default_answer_time_limit_enabled = 1,
+        default_answer_time_limit_seconds = COALESCE(default_answer_time_limit_seconds, 120),
+        schema_version = 4,
+        updated_at = datetime('now')
+      WHERE id = 1`
+    ).run();
+    db.prepare(
+      `UPDATE learning_plan SET
+        post_stage_review_enabled = 1,
+        answer_time_limit_enabled = 1`
+    ).run();
   })();
 }

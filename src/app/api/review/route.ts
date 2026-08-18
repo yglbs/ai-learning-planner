@@ -27,6 +27,7 @@ export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const planId = searchParams.get("plan_id");
+    const stageId = searchParams.get("stage_id");
 
     expireOverdueReviews();
     getAllDueReviewCount();
@@ -42,7 +43,10 @@ export async function GET(request: Request) {
     }
 
     const { upcoming, completed } = categorizeReviews(schedules);
-    const pending = planId ? getPendingReviews(planId) : getPendingReviews();
+    let pending = planId ? getPendingReviews(planId) : getPendingReviews();
+    if (stageId) {
+      pending = pending.filter((s) => s.stage_id === stageId);
+    }
 
     return NextResponse.json({ pending, upcoming, completed });
   } catch (error) {
@@ -53,7 +57,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { review_schedule_id, questions, score, duration_minutes } = body;
+    const { review_schedule_id, questions, score, duration_minutes, timed_out } = body;
 
     if (!review_schedule_id || !Array.isArray(questions) || score == null) {
       return NextResponse.json(
@@ -62,14 +66,25 @@ export async function POST(request: Request) {
       );
     }
 
-    const id = createReviewSession({
+    const result = createReviewSession({
       review_schedule_id,
       questions,
       score: Number(score),
       duration_minutes: Number(duration_minutes) || 0,
+      timed_out: timed_out === true,
     });
 
-    return NextResponse.json({ success: true, id });
+    if (result.unlockedNext && result.planId != null && result.currentIndex != null) {
+      const { generateProjectForUnlockedStage } = await import("@/lib/stage-complete");
+      await generateProjectForUnlockedStage(result.planId, result.currentIndex);
+    }
+
+    return NextResponse.json({
+      success: true,
+      id: result.id,
+      unlocked_next: result.unlockedNext,
+      post_review_passed: result.postReviewPassed,
+    });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

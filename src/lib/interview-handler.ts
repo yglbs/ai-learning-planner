@@ -15,11 +15,12 @@ import {
 } from "@/lib/prompt-composer";
 import type { LearningPlan, Stage } from "@/db/queries";
 import type { GroundedSourceBundle, LearningMode } from "@/lib/learning-types";
+import { resolvePlanTimeLimit } from "@/lib/challenge";
+import { clampAnswerSeconds, DEFAULT_COUNTDOWN_SECONDS } from "@/lib/learning-types";
 import {
   serverNowIso,
   computeAnswerDeadline,
   evaluateAnswerTiming,
-  DEFAULT_COUNTDOWN_SECONDS,
 } from "@/lib/interview-countdown";
 
 export { DEFAULT_COUNTDOWN_SECONDS };
@@ -29,6 +30,7 @@ export interface InterviewPostBody {
   style?: string;
   countdown_enabled?: boolean;
   countdown_seconds?: number;
+  fail_on_timeout?: boolean;
   /** Diagnostic only — never used for lateness authority. */
   elapsed_seconds?: number;
   session_id?: string;
@@ -44,6 +46,7 @@ export interface InterviewPostResult {
   server_now?: string;
   countdown_enabled?: boolean;
   countdown_seconds?: number;
+  failed_timeout?: boolean;
 }
 
 export function resolveCountdown(body: InterviewPostBody): {
@@ -54,8 +57,28 @@ export function resolveCountdown(body: InterviewPostBody): {
     enabled: body.countdown_enabled === true,
     seconds:
       typeof body.countdown_seconds === "number" && body.countdown_seconds > 0
-        ? body.countdown_seconds
+        ? clampAnswerSeconds(body.countdown_seconds, DEFAULT_COUNTDOWN_SECONDS)
         : DEFAULT_COUNTDOWN_SECONDS,
+  };
+}
+
+export function resolveInterviewCountdown(
+  plan: Pick<LearningPlan, "answer_time_limit_enabled" | "answer_time_limit_seconds"> | null,
+  body: InterviewPostBody
+): { enabled: boolean; seconds: number; failOnTimeout: boolean } {
+  const planLimit = plan ? resolvePlanTimeLimit(plan) : { enabled: false, seconds: DEFAULT_COUNTDOWN_SECONDS };
+  if (planLimit.enabled) {
+    return {
+      enabled: true,
+      seconds: planLimit.seconds,
+      failOnTimeout: true,
+    };
+  }
+  const requested = resolveCountdown(body);
+  return {
+    enabled: requested.enabled,
+    seconds: requested.seconds,
+    failOnTimeout: body.fail_on_timeout === true,
   };
 }
 
@@ -108,10 +131,17 @@ export async function runInterviewExchange(
   }
 
   const history = getInterviewTurns(session.id);
-  const chatMessages = history.map((t) => ({
-    role: t.role as "user" | "assistant",
-    content: t.content,
-  }));
+  const failedTimeout = isLate && session.fail_on_timeout;
+  const chatMessages = history.map((t, i) => {
+    let content = t.content;
+    if (failedTimeout && t.role === "user" && i === history.length - 1) {
+      content = `${content}\n\n[系统判定] 本题回答超时，记为失败，不得分。请简短告知候选人本题已超时失败，然后提出下一题，不要重复上一题。`;
+    }
+    return {
+      role: t.role as "user" | "assistant",
+      content,
+    };
+  });
 
   const text = await runInterviewLlm(systemPrompt, chatMessages);
 
@@ -144,6 +174,7 @@ export async function runInterviewExchange(
     server_now: serverNowIso(),
     countdown_enabled: session.countdown_enabled,
     countdown_seconds: session.countdown_seconds,
+    failed_timeout: failedTimeout,
   };
 }
 
@@ -161,7 +192,7 @@ export async function handleStageInterviewPost(params: {
   if (!message) throw new Error("消息不能为空");
 
   const style = body.style || "standard";
-  const countdown = resolveCountdown(body);
+  const countdown = resolveInterviewCountdown(plan, body);
 
   const session = getOrCreateInterviewSession({
     session_key: legacyChatId,
@@ -171,6 +202,7 @@ export async function handleStageInterviewPost(params: {
     style,
     countdown_enabled: countdown.enabled,
     countdown_seconds: countdown.seconds,
+    fail_on_timeout: countdown.failOnTimeout,
   });
 
   const systemPrompt = composeStageInterviewSystemPrompt({
@@ -203,7 +235,7 @@ export async function handlePlanInterviewPost(params: {
   if (!message) throw new Error("消息不能为空");
 
   const style = body.style || "standard";
-  const countdown = resolveCountdown(body);
+  const countdown = resolveInterviewCountdown(plan, body);
 
   const session = getOrCreateInterviewSession({
     session_key: legacyChatId,
@@ -212,6 +244,7 @@ export async function handlePlanInterviewPost(params: {
     style,
     countdown_enabled: countdown.enabled,
     countdown_seconds: countdown.seconds,
+    fail_on_timeout: countdown.failOnTimeout,
   });
 
   const systemPrompt = composePlanInterviewSystemPrompt({

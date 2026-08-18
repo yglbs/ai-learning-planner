@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import {
   LearnerAvatarPicker,
   TeachBackgroundPicker,
@@ -23,7 +24,7 @@ import { StageProgressPanel } from "@/components/stage-progress-panel";
 import { StageScenariosPanel } from "@/components/stage-scenarios-panel";
 import { LearningModeSwitcher } from "@/components/learning-mode-switcher";
 import type { LearningMode, OutlineStatus } from "@/lib/learning-types";
-import { defaultLearningMode } from "@/lib/learning-types";
+import { defaultLearningMode, DEFAULT_COUNTDOWN_SECONDS } from "@/lib/learning-types";
 
 interface Plan {
   id: string;
@@ -38,6 +39,9 @@ interface Plan {
   career_identity?: string;
   source_type?: string;
   source_path?: string | null;
+  post_stage_review_enabled?: boolean;
+  answer_time_limit_enabled?: boolean;
+  answer_time_limit_seconds?: number;
 }
 
 interface PlanSummary {
@@ -62,6 +66,7 @@ interface Stage {
   summary_text?: string;
   outline_status?: OutlineStatus;
   outline_confirmed_at?: string | null;
+  post_review_status?: string;
 }
 
 interface Resource {
@@ -375,6 +380,73 @@ export default function PlanDashboard() {
       toast.error((e as Error).message);
     } finally {
       setGeneratingResources(false);
+    }
+  }
+
+  async function handleTogglePostStageReview(enabled: boolean) {
+    if (!plan) return;
+    try {
+      const res = await fetch("/api/plan", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: plan.id,
+          post_stage_review_enabled: enabled,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "更新失败");
+      }
+      const data = await res.json();
+      if (data.plan) setPlan((p) => (p ? { ...p, ...data.plan } : p));
+      toast.success(enabled ? "已开启阶段后复习" : "已关闭阶段后复习");
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+
+  async function handleToggleTimeLimit(enabled: boolean) {
+    if (!plan) return;
+    try {
+      const res = await fetch("/api/plan", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: plan.id,
+          answer_time_limit_enabled: enabled,
+          answer_time_limit_seconds: plan.answer_time_limit_seconds || DEFAULT_COUNTDOWN_SECONDS,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "更新失败");
+      }
+      const data = await res.json();
+      if (data.plan) setPlan((p) => (p ? { ...p, ...data.plan } : p));
+      toast.success(enabled ? "已开启答题限时" : "已关闭答题限时");
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+
+  async function handleTimeLimitSeconds(seconds: number) {
+    if (!plan) return;
+    try {
+      const res = await fetch("/api/plan", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: plan.id,
+          answer_time_limit_enabled: true,
+          answer_time_limit_seconds: seconds,
+        }),
+      });
+      if (!res.ok) throw new Error("更新失败");
+      const data = await res.json();
+      if (data.plan) setPlan((p) => (p ? { ...p, ...data.plan } : p));
+    } catch (e) {
+      toast.error((e as Error).message);
     }
   }
 
@@ -701,11 +773,60 @@ export default function PlanDashboard() {
                       value={plan.learning_mode || defaultLearningMode(plan.source_type || "goal")}
                       onChange={(mode) => setPlan((p) => (p ? { ...p, learning_mode: mode } : p))}
                     />
+                    <div className="mt-2 flex items-center gap-2 flex-wrap">
+                      <Button
+                        type="button"
+                        variant={plan.post_stage_review_enabled !== false ? "default" : "outline"}
+                        size="sm"
+                        className="rounded-lg text-xs h-8"
+                        onClick={() => handleTogglePostStageReview(plan.post_stage_review_enabled === false)}
+                      >
+                        {plan.post_stage_review_enabled !== false ? "阶段复习：开" : "阶段复习：关"}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={plan.answer_time_limit_enabled ? "default" : "outline"}
+                        size="sm"
+                        className="rounded-lg text-xs h-8"
+                        onClick={() => handleToggleTimeLimit(!plan.answer_time_limit_enabled)}
+                      >
+                        {plan.answer_time_limit_enabled ? "答题限时：开" : "答题限时：关"}
+                      </Button>
+                      {plan.answer_time_limit_enabled && (
+                        <div className="flex items-center gap-1.5">
+                          <Input
+                            type="number"
+                            min={10}
+                            max={3600}
+                            className="h-8 w-20 text-xs"
+                            value={plan.answer_time_limit_seconds || DEFAULT_COUNTDOWN_SECONDS}
+                            onChange={(e) => {
+                              const seconds = Math.min(3600, Math.max(10, Number(e.target.value) || DEFAULT_COUNTDOWN_SECONDS));
+                              setPlan((p) => (p ? { ...p, answer_time_limit_seconds: seconds } : p));
+                            }}
+                            onBlur={(e) => {
+                              const seconds = Math.min(3600, Math.max(10, Number(e.target.value) || DEFAULT_COUNTDOWN_SECONDS));
+                              void handleTimeLimitSeconds(seconds);
+                            }}
+                          />
+                          <span className="text-[10px] text-muted-foreground">秒</span>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
 
                 {(selectedStage.status === "active" || selectedStage.status === "completed") && (
                   <div className="flex items-center gap-2 shrink-0">
+                    {selectedStage.status === "completed" && selectedStage.post_review_status === "pending" && (
+                      <Button
+                        size="sm"
+                        className="rounded-lg text-xs"
+                        onClick={() => router.push(`/review?plan_id=${planId}&stage_id=${selectedStage.id}`)}
+                      >
+                        🔁 可选阶段复习
+                      </Button>
+                    )}
                     {selectedStage.status === "active" && (
                       <Button
                         variant="ghost"

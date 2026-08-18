@@ -7,6 +7,7 @@ import {
   type CareerIdentity,
   type LearningMode,
 } from "@/lib/learning-types";
+import { parseChallengeSettings } from "@/lib/challenge";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -42,6 +43,9 @@ export async function PATCH(request: Request) {
       id?: string;
       learning_mode?: unknown;
       career_identity?: unknown;
+      post_stage_review_enabled?: unknown;
+      answer_time_limit_enabled?: unknown;
+      answer_time_limit_seconds?: unknown;
     };
     try {
       body = await request.json();
@@ -58,7 +62,13 @@ export async function PATCH(request: Request) {
       return NextResponse.json({ error: "计划不存在" }, { status: 404 });
     }
 
-    const updates: { learning_mode?: LearningMode; career_identity?: CareerIdentity } = {};
+    const updates: {
+      learning_mode?: LearningMode;
+      career_identity?: CareerIdentity;
+      post_stage_review_enabled?: boolean;
+      answer_time_limit_enabled?: boolean;
+      answer_time_limit_seconds?: number;
+    } = {};
 
     if (body.learning_mode !== undefined) {
       updates.learning_mode = parseLearningMode(
@@ -68,6 +78,18 @@ export async function PATCH(request: Request) {
     }
     if (body.career_identity !== undefined) {
       updates.career_identity = parseCareerIdentity(body.career_identity);
+    }
+    if (
+      body.post_stage_review_enabled !== undefined
+      || body.answer_time_limit_enabled !== undefined
+      || body.answer_time_limit_seconds !== undefined
+    ) {
+      const challenge = parseChallengeSettings({
+        post_stage_review_enabled: body.post_stage_review_enabled ?? plan.post_stage_review_enabled,
+        answer_time_limit_enabled: body.answer_time_limit_enabled ?? plan.answer_time_limit_enabled,
+        answer_time_limit_seconds: body.answer_time_limit_seconds ?? plan.answer_time_limit_seconds,
+      });
+      Object.assign(updates, challenge);
     }
 
     if (Object.keys(updates).length === 0) {

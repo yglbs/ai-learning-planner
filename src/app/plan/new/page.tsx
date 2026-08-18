@@ -86,6 +86,9 @@ export default function NewPlanPage() {
   const [level, setLevel] = useState("beginner");
   const [learningMode, setLearningMode] = useState<LearningMode>("business");
   const [careerIdentity, setCareerIdentity] = useState<CareerIdentity>("");
+  const [postStageReviewEnabled, setPostStageReviewEnabled] = useState(true);
+  const [answerTimeLimitEnabled, setAnswerTimeLimitEnabled] = useState(true);
+  const [answerTimeLimitSeconds, setAnswerTimeLimitSeconds] = useState(120);
 
   const [dialogueAnswers, setDialogueAnswers] = useState<Record<string, string>>({
     motivation: "",
@@ -112,6 +115,23 @@ export default function NewPlanPage() {
     plan: { plan_title: string; stages: GeneratedStage[] };
   } | null>(null);
   const [generating, setGenerating] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/config")
+      .then((r) => r.json())
+      .then((data) => {
+        if (typeof data.default_post_stage_review_enabled === "boolean") {
+          setPostStageReviewEnabled(data.default_post_stage_review_enabled);
+        }
+        if (typeof data.default_answer_time_limit_enabled === "boolean") {
+          setAnswerTimeLimitEnabled(data.default_answer_time_limit_enabled);
+        }
+        if (typeof data.default_answer_time_limit_seconds === "number") {
+          setAnswerTimeLimitSeconds(data.default_answer_time_limit_seconds);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   function handleTemplateSelect(templateId: string) {
     const template = PLAN_TEMPLATES.find((t) => t.id === templateId);
@@ -157,6 +177,9 @@ export default function NewPlanPage() {
             motivation: dialogueAnswers.motivation,
             background: dialogueAnswers.background,
             expected_outcome: dialogueAnswers.outcome,
+            post_stage_review_enabled: postStageReviewEnabled,
+            answer_time_limit_enabled: answerTimeLimitEnabled,
+            answer_time_limit_seconds: answerTimeLimitSeconds,
           }),
         });
       } else if (uploadedFile) {
@@ -170,6 +193,9 @@ export default function NewPlanPage() {
         formData.append("motivation", dialogueAnswers.motivation || "");
         formData.append("background", dialogueAnswers.background || "");
         formData.append("expected_outcome", dialogueAnswers.outcome || "");
+        formData.append("post_stage_review_enabled", String(postStageReviewEnabled));
+        formData.append("answer_time_limit_enabled", String(answerTimeLimitEnabled));
+        formData.append("answer_time_limit_seconds", String(answerTimeLimitSeconds));
 
         res = await fetch("/api/plan/generate-from-book", {
           method: "POST",
@@ -189,6 +215,9 @@ export default function NewPlanPage() {
             motivation: dialogueAnswers.motivation,
             background: dialogueAnswers.background,
             expected_outcome: dialogueAnswers.outcome,
+            post_stage_review_enabled: postStageReviewEnabled,
+            answer_time_limit_enabled: answerTimeLimitEnabled,
+            answer_time_limit_seconds: answerTimeLimitSeconds,
           }),
         });
       }
@@ -775,6 +804,61 @@ export default function NewPlanPage() {
                       </label>
                     ))}
                   </RadioGroup>
+                </div>
+
+                <div className="space-y-3 pt-1">
+                  <Label className="text-base font-medium flex items-center gap-2">
+                    <span className="text-lg">🔁</span> 阶段后复习
+                  </Label>
+                  <div className="flex items-center justify-between gap-3 p-4 rounded-xl border border-border/40">
+                    <p className="text-xs text-muted-foreground leading-relaxed pr-3">
+                      阶段检测通过后会生成一轮即时复习，可选做，不挡住下一阶段。
+                    </p>
+                    <Button
+                      type="button"
+                      variant={postStageReviewEnabled ? "default" : "outline"}
+                      size="sm"
+                      className="shrink-0"
+                      onClick={() => setPostStageReviewEnabled((v) => !v)}
+                    >
+                      {postStageReviewEnabled ? "已开启" : "已关闭"}
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <Label className="text-base font-medium flex items-center gap-2">
+                    <span className="text-lg">⏱️</span> 答题限时失败
+                  </Label>
+                  <div className="p-4 rounded-xl border border-border/40 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-xs text-muted-foreground leading-relaxed pr-3">
+                        可开可关。开启后，检测 / 面试 / 阶段复习会统计作答时间；超时本题或本轮直接失败。
+                      </p>
+                      <Button
+                        type="button"
+                        variant={answerTimeLimitEnabled ? "default" : "outline"}
+                        size="sm"
+                        className="shrink-0"
+                        onClick={() => setAnswerTimeLimitEnabled((v) => !v)}
+                      >
+                        {answerTimeLimitEnabled ? "已开启" : "已关闭"}
+                      </Button>
+                    </div>
+                    {answerTimeLimitEnabled && (
+                      <div className="flex items-center gap-3">
+                        <Label className="text-xs text-muted-foreground shrink-0">限时秒数</Label>
+                        <Input
+                          type="number"
+                          min={10}
+                          max={3600}
+                          value={answerTimeLimitSeconds}
+                          onChange={(e) => setAnswerTimeLimitSeconds(Math.min(3600, Math.max(10, Number(e.target.value) || 120)))}
+                          className="h-9 rounded-lg bg-background/50 border-border/40 w-28 text-sm"
+                        />
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 

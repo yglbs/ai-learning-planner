@@ -14,6 +14,7 @@ import {
   buildCountdownRequestFields,
   DEFAULT_COUNTDOWN_SECONDS,
 } from "@/components/interview-countdown";
+import { INTERVIEW_STYLE_OPTIONS, type InterviewStyleId } from "@/lib/learning-types";
 
 interface ChatMsg {
   role: string;
@@ -21,13 +22,9 @@ interface ChatMsg {
   answer_deadline_at?: string | null;
 }
 
-type InterviewStyle = "friendly" | "standard" | "tough";
+type InterviewStyle = InterviewStyleId;
 
-const STYLES: { id: InterviewStyle; icon: string; name: string; desc: string }[] = [
-  { id: "friendly", icon: "😊", name: "友善引导", desc: "像和同事聊天，轻松愉快" },
-  { id: "standard", icon: "👔", name: "标准技术面", desc: "模拟真实面试流程" },
-  { id: "tough", icon: "🔥", name: "压力面试", desc: "深挖细节，持续追问" },
-];
+const STYLES = INTERVIEW_STYLE_OPTIONS;
 
 export default function StageInterviewPage() {
   const router = useRouter();
@@ -46,6 +43,8 @@ export default function StageInterviewPage() {
   const [answerDeadlineAt, setAnswerDeadlineAt] = useState<string | null>(null);
   const [serverNow, setServerNow] = useState<string | null>(null);
   const [isLate, setIsLate] = useState(false);
+  const [failedTimeout, setFailedTimeout] = useState(false);
+  const [failOnTimeout, setFailOnTimeout] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -58,6 +57,11 @@ export default function StageInterviewPage() {
         if (stage) {
           setStageTitle(stage.title);
           setStageIndex(stage.order_index ?? 0);
+        }
+        if (data?.plan?.answer_time_limit_enabled) {
+          setCountdownEnabled(true);
+          setCountdownSeconds(data.plan.answer_time_limit_seconds || DEFAULT_COUNTDOWN_SECONDS);
+          setFailOnTimeout(true);
         }
       })
       .catch(() => {});
@@ -93,12 +97,14 @@ export default function StageInterviewPage() {
     is_late?: boolean;
     countdown_enabled?: boolean;
     countdown_seconds?: number;
+    failed_timeout?: boolean;
   }) {
     if (reply.answer_deadline_at !== undefined) setAnswerDeadlineAt(reply.answer_deadline_at || null);
     if (reply.server_now) setServerNow(reply.server_now);
     if (typeof reply.is_late === "boolean") setIsLate(reply.is_late);
     if (typeof reply.countdown_enabled === "boolean") setCountdownEnabled(reply.countdown_enabled);
     if (typeof reply.countdown_seconds === "number") setCountdownSeconds(reply.countdown_seconds);
+    if (typeof reply.failed_timeout === "boolean") setFailedTimeout(reply.failed_timeout);
   }
 
   async function startInterview(s: InterviewStyle) {
@@ -118,7 +124,7 @@ export default function StageInterviewPage() {
         const chatRes = await fetch(`/api/stage/${stageId}/interview`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: "开始面试", style: s, ...countdown }),
+          body: JSON.stringify({ message: "开始面试", style: s, fail_on_timeout: failOnTimeout, ...countdown }),
         });
         const reply = await chatRes.json().catch(() => ({}));
         if (!chatRes.ok) throw new Error(reply.error || "开始失败，请稍后重试");
@@ -142,9 +148,10 @@ export default function StageInterviewPage() {
     }
   }
 
-  async function handleSend() {
-    if (!input.trim() || sending || !style) return;
-    const msg = input.trim();
+  async function handleSend(forcedMessage?: string) {
+    if (sending || !style) return;
+    const msg = (forcedMessage ?? input).trim() || "（超时未作答）";
+    if (!forcedMessage && !input.trim()) return;
     setInput("");
     setMessages((prev) => [...prev, { role: "user", content: msg }]);
     setSending(true);
@@ -159,7 +166,7 @@ export default function StageInterviewPage() {
       const res = await fetch(`/api/stage/${stageId}/interview`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: msg, style, ...countdown }),
+        body: JSON.stringify({ message: msg, style, fail_on_timeout: failOnTimeout, ...countdown }),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -187,6 +194,7 @@ export default function StageInterviewPage() {
       setStyle(null);
       setAnswerDeadlineAt(null);
       setIsLate(false);
+      setFailedTimeout(false);
       toast.success("面试已重置");
     } catch {
       toast.error("重置失败");
@@ -276,6 +284,7 @@ export default function StageInterviewPage() {
             serverNow={serverNow}
             enabled={countdownEnabled}
             totalSeconds={countdownSeconds}
+            onExpire={() => { void handleSend("（超时未作答）"); }}
           />
           <div className="flex items-center gap-2 shrink-0">
             <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => { setStyle(null); }}>
@@ -290,7 +299,7 @@ export default function StageInterviewPage() {
 
       <main className="flex-1 overflow-y-auto px-6 py-6">
         <div className="max-w-3xl mx-auto space-y-4">
-          <InterviewLateBanner isLate={isLate} />
+          <InterviewLateBanner isLate={isLate} failedTimeout={failedTimeout} />
           {messages.filter((m) => m.content !== "开始面试").map((msg, i) => (
             <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
               <div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap ${
@@ -352,7 +361,7 @@ export default function StageInterviewPage() {
             />
             <Button
               className="h-auto rounded-xl px-6 shrink-0"
-              onClick={handleSend}
+              onClick={() => handleSend()}
               disabled={!input.trim() || sending}
             >
               发送

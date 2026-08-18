@@ -1,61 +1,20 @@
 import { NextResponse } from "next/server";
-import { getStage, createAssessment, updateStage, unlockNextStage, checkPlanCompletion, createMasteryProfile, createReviewSchedulesForStage, getPlan, getAssessmentsByStage, getChatHistory } from "@/db/queries";
-import { assessLearning, analyzeMastery, generateStageProject, regenerateAssessmentQuestions } from "@/lib/ai";
+import {
+  getStage,
+  createAssessment,
+  updateStage,
+  createMasteryProfile,
+  getPlan,
+  getAssessmentsByStage,
+  getChatHistory,
+  type Stage,
+} from "@/db/queries";
+import { assessLearning, analyzeMastery, regenerateAssessmentQuestions } from "@/lib/ai";
 import type { AssessmentQuestionInput } from "@/lib/ai";
-import type { Stage } from "@/db/queries";
 import { markAssessmentCheckpoint } from "@/lib/teach-chat-handler";
-
-async function completeStageAndUnlockNext(stage: Stage) {
-  updateStage(stage.id, {
-    status: "completed",
-    completed_at: new Date().toISOString(),
-  } as unknown as Stage);
-
-  try {
-    const plan = getPlan(stage.plan_id);
-    if (plan && plan.review_enabled !== false) {
-      const preset = (plan as unknown as Record<string, unknown>).review_interval_preset as string || "standard";
-      createReviewSchedulesForStage(stage.id, stage.plan_id, preset);
-    }
-  } catch (e) {
-    console.error("Review schedule creation failed (non-fatal):", e);
-  }
-
-  const hasNext = unlockNextStage(stage.plan_id, stage.order_index);
-  if (hasNext) {
-    try {
-      const { getStagesByPlan, getProjectByStage, createStageProject } = await import("@/db/queries");
-      const stages = getStagesByPlan(stage.plan_id);
-      const nextStage = stages.find(s => s.order_index === stage.order_index + 1);
-      if (nextStage && !getProjectByStage(nextStage.id)) {
-        const plan = getPlan(stage.plan_id);
-        const project = await generateStageProject({
-          stage_title: nextStage.title,
-          key_topics: nextStage.key_topics,
-          core_output: nextStage.core_output || "",
-          real_world_cases: nextStage.real_world_cases || [],
-          goal: plan?.goal_description || "",
-          skill_level: plan?.skill_level || "beginner",
-        });
-        createStageProject({
-          stage_id: nextStage.id,
-          title: project.title,
-          description: project.description,
-          expected_output: project.expected_output,
-          checklist: project.checklist,
-          difficulty: project.difficulty,
-          estimated_minutes: project.estimated_minutes,
-        });
-      }
-    } catch (e) {
-      console.error("Next stage project generation failed (non-fatal):", e);
-    }
-  } else {
-    checkPlanCompletion(stage.plan_id);
-  }
-
-  return hasNext;
-}
+import { completeStageAndUnlockNext } from "@/lib/stage-complete";
+import { crossValidateAssessment } from "@/lib/cross-validate";
+import { isOverTimeLimit, resolvePlanTimeLimit } from "@/lib/challenge";
 
 export async function POST(
   request: Request,
@@ -71,9 +30,20 @@ export async function POST(
     return NextResponse.json({ error: "该阶段尚未解锁" }, { status: 400 });
   }
 
-  const body = await request.json();
+  let body: {
+    skip?: boolean;
+    input_text?: string;
+    answers?: { question: string; answer: string }[];
+    structured_answers?: AssessmentQuestionInput[];
+    timed_out?: boolean;
+    elapsed_seconds?: number;
+  };
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "请求格式无效" }, { status: 400 });
+  }
 
-  // Skip assessment: mark stage complete and unlock next without grading
   if (body.skip === true) {
     if (stage.status !== "active") {
       return NextResponse.json({ error: "当前阶段已完成，无需跳过检测" }, { status: 400 });
@@ -95,19 +65,23 @@ export async function POST(
         per_question_results: [],
       });
 
-      const hasNext = await completeStageAndUnlockNext(stage);
+      const complete = await completeStageAndUnlockNext(stage);
       markAssessmentCheckpoint(id, true, true);
 
       return NextResponse.json({
         assessmentId,
         skipped: true,
         passed: true,
-        hasNext,
+        hasNext: complete.hasNext,
+        post_review_available: complete.postReviewAvailable,
+        post_review_id: complete.postReviewId,
         score_overall: 0,
         score_coverage: 0,
         score_depth: 0,
         score_accuracy: 0,
-        feedback: "你选择跳过本阶段检测，直接进入下一阶段学习。",
+        feedback: complete.postReviewAvailable
+          ? "你选择跳过本阶段检测。可选做本阶段复习巩固，下一阶段已可继续。"
+          : "你选择跳过本阶段检测，直接进入下一阶段学习。",
         missing_topics: [],
         suggestions: [],
         per_question_results: [],
@@ -120,8 +94,8 @@ export async function POST(
 
   const { input_text, answers, structured_answers } = body;
 
-  const hasStructured = structured_answers?.length > 0;
-  const hasAnswers = answers?.length > 0;
+  const hasStructured = (structured_answers?.length ?? 0) > 0;
+  const hasAnswers = (answers?.length ?? 0) > 0;
 
   let combinedText: string;
   if (hasStructured) {
@@ -129,9 +103,50 @@ export async function POST(
       .map((q: AssessmentQuestionInput, i: number) => `问题${i + 1} [${q.type}]: ${q.question}\n回答: ${q.user_answer}`)
       .join("\n\n");
   } else if (hasAnswers) {
-    combinedText = answers.map((a: { question: string; answer: string }, i: number) => `问题${i + 1}: ${a.question}\n回答: ${a.answer}`).join("\n\n");
+    combinedText = answers!.map((a: { question: string; answer: string }, i: number) => `问题${i + 1}: ${a.question}\n回答: ${a.answer}`).join("\n\n");
   } else {
     combinedText = input_text || "";
+  }
+
+  const plan = getPlan(stage.plan_id);
+  const timeLimit = plan ? resolvePlanTimeLimit(plan) : { enabled: false, seconds: 120 };
+  const timedOut = isOverTimeLimit({
+    enabled: timeLimit.enabled,
+    limitSeconds: timeLimit.seconds,
+    elapsedSeconds: body.elapsed_seconds,
+    timedOut: body.timed_out === true,
+  });
+
+  if (timedOut) {
+    const assessmentId = createAssessment({
+      stage_id: id,
+      type: hasStructured ? "structured" : hasAnswers ? "qa" : "text",
+      input_text: combinedText || "[timed_out]",
+      score_overall: 0,
+      score_coverage: 0,
+      score_depth: 0,
+      score_accuracy: 0,
+      passed: false,
+      feedback: `答题超时（限时 ${timeLimit.seconds} 秒），本次检测失败。请在时限内完成作答后重试。`,
+      missing_topics: stage.key_topics,
+      suggestions: [],
+      per_question_results: [],
+      timed_out: true,
+      elapsed_seconds: body.elapsed_seconds ?? timeLimit.seconds,
+    });
+    return NextResponse.json({
+      assessmentId,
+      passed: false,
+      timed_out: true,
+      score_overall: 0,
+      score_coverage: 0,
+      score_depth: 0,
+      score_accuracy: 0,
+      feedback: `答题超时（限时 ${timeLimit.seconds} 秒），本次检测失败。`,
+      missing_topics: stage.key_topics,
+      suggestions: [],
+      per_question_results: [],
+    });
   }
 
   if (!combinedText || combinedText.trim().length < 20) {
@@ -142,7 +157,7 @@ export async function POST(
   }
 
   try {
-    const result = await assessLearning({
+    const assessParams = {
       stage_title: stage.title,
       key_topics: stage.key_topics,
       learning_objectives: stage.learning_objectives || [],
@@ -150,7 +165,11 @@ export async function POST(
       questions: stage.assessment_questions || [],
       structured_questions: hasStructured ? structured_answers : undefined,
       answers: hasAnswers ? answers : undefined,
-    });
+    };
+
+    const primary = await assessLearning(assessParams);
+    const cross = await crossValidateAssessment(primary, assessParams);
+    const result = cross.final;
 
     const enrichedPerQuestion = (result.per_question_results || []).map((pqr, i) => {
       const sq = hasStructured ? (structured_answers as AssessmentQuestionInput[])[i] : undefined;
@@ -175,12 +194,15 @@ export async function POST(
       missing_topics: result.missing_topics,
       suggestions: result.suggestions,
       per_question_results: enrichedPerQuestion,
+      validator_score_overall: cross.validator?.score_overall ?? null,
+      validator_passed: cross.validator?.passed ?? null,
+      validator_feedback: cross.validator?.feedback || cross.validator_error || "",
+      cross_check_agreed: cross.validator ? cross.agreed : null,
+      elapsed_seconds: body.elapsed_seconds ?? null,
     });
 
-    // Create mastery profile (non-blocking)
     try {
       const previousAssessments = getAssessmentsByStage(id);
-      const previousLevels: string[] = [];
       const masteryResult = await analyzeMastery({
         stage_title: stage.title,
         key_topics: stage.key_topics,
@@ -189,7 +211,7 @@ export async function POST(
         score_depth: result.score_depth,
         missing_topics: result.missing_topics,
         attempt_number: previousAssessments.length,
-        previous_levels: previousLevels,
+        previous_levels: [],
       });
 
       createMasteryProfile({
@@ -203,17 +225,25 @@ export async function POST(
       console.error("Mastery analysis failed (non-fatal):", e);
     }
 
+    let complete: Awaited<ReturnType<typeof completeStageAndUnlockNext>> | null = null;
     if (result.passed) {
       markAssessmentCheckpoint(id, true, false);
-      await completeStageAndUnlockNext(stage);
+      complete = await completeStageAndUnlockNext(stage);
     }
 
     return NextResponse.json({
       assessmentId,
       ...result,
       per_question_results: enrichedPerQuestion,
+      cross_check_agreed: cross.validator ? cross.agreed : null,
+      validator_score_overall: cross.validator?.score_overall ?? null,
+      validator_passed: cross.validator?.passed ?? null,
+      post_review_available: complete?.postReviewAvailable ?? false,
+      post_review_id: complete?.postReviewId ?? null,
+      hasNext: complete?.hasNext ?? false,
     });
   } catch (e) {
+    console.error("Assessment failed:", e);
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });
   }
 }
@@ -230,7 +260,7 @@ export async function PATCH(
 
   try {
     const chatHistory = getChatHistory(id);
-    const chatMessages = chatHistory.map(m => ({ role: m.role, content: m.content }));
+    const chatMessages = chatHistory.map((m) => ({ role: m.role, content: m.content }));
 
     const questions = await regenerateAssessmentQuestions({
       stage_title: stage.title,

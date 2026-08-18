@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { generatePlanFromCode, extractConcepts, generateStageProject } from "@/lib/ai";
 import { parseLearningMode, parseCareerIdentity } from "@/lib/learning-types";
+import { parseChallengeSettings } from "@/lib/challenge";
 import {
   createPlan, createStage, updatePlan,
   createConcept, createRelation, createStageProject, getStagesByPlan,
@@ -27,6 +28,9 @@ export async function POST(request: Request) {
       expected_outcome = "",
       learning_mode,
       career_identity,
+      post_stage_review_enabled,
+      answer_time_limit_enabled,
+      answer_time_limit_seconds,
     } = body;
 
     const resolvedMode = parseLearningMode(learning_mode, "business_through_tech");
@@ -113,6 +117,11 @@ export async function POST(request: Request) {
     updatePlan(planId, {
       total_stages: generated.stages.length,
       started_at: new Date().toISOString(),
+      ...parseChallengeSettings({
+        post_stage_review_enabled,
+        answer_time_limit_enabled,
+        answer_time_limit_seconds,
+      }),
     } as unknown as import("@/db/queries").LearningPlan);
 
     for (let i = 0; i < generated.stages.length; i++) {

@@ -1,4 +1,5 @@
 import type { StageOutline } from "@/lib/learning-types";
+import { POST_STAGE_REVIEW_PASS_SCORE } from "@/lib/learning-types";
 
 import { getDb } from "./schema";
 import { v4 as uuidv4 } from "uuid";
@@ -20,6 +21,14 @@ export interface SystemConfig {
   search_region: string;
   review_notifications: boolean;
   default_review_interval_preset: string;
+  validator_enabled: boolean;
+  validator_llm_provider: string;
+  validator_llm_api_key: string;
+  validator_llm_base_url: string;
+  validator_llm_model: string;
+  default_post_stage_review_enabled: boolean;
+  default_answer_time_limit_enabled: boolean;
+  default_answer_time_limit_seconds: number;
 }
 
 export type LearningMode = "business" | "technical" | "business_through_tech";
@@ -55,6 +64,9 @@ export interface LearningPlan {
   career_identity: CareerIdentity;
   architecture_snapshot: string;
   architecture_generated_at: string | null;
+  post_stage_review_enabled: boolean;
+  answer_time_limit_enabled: boolean;
+  answer_time_limit_seconds: number;
 }
 
 export interface Stage {
@@ -79,6 +91,7 @@ export interface Stage {
   outline_json: string;
   outline_confirmed_at: string | null;
   learning_started_at: string | null;
+  post_review_status: string;
 }
 
 export interface Resource {
@@ -132,6 +145,12 @@ export interface Assessment {
   per_question_results: PerQuestionResult[];
   attempt_number: number;
   created_at: string;
+  validator_score_overall: number | null;
+  validator_passed: boolean | null;
+  validator_feedback: string;
+  cross_check_agreed: boolean | null;
+  timed_out: boolean;
+  elapsed_seconds: number | null;
 }
 
 export interface SearchCacheEntry {
@@ -159,6 +178,7 @@ const PLAN_UPDATE_WHITELIST = new Set([
   "review_enabled", "adaptive_enabled", "analytics_enabled", "review_interval_preset",
   "source_type", "source_path", "source_file_tree", "source_files",
   "learning_mode", "career_identity", "architecture_snapshot", "architecture_generated_at",
+  "post_stage_review_enabled", "answer_time_limit_enabled", "answer_time_limit_seconds",
 ]);
 
 const STAGE_UPDATE_WHITELIST = new Set([
@@ -166,6 +186,7 @@ const STAGE_UPDATE_WHITELIST = new Set([
   "summary_text", "resource_completion_rate", "unlocked_at", "completed_at",
   "real_world_cases", "assessment_questions", "core_output", "learning_objectives",
   "outline_status", "outline_json", "outline_confirmed_at", "learning_started_at",
+  "post_review_status",
 ]);
 
 export function getConfig(): SystemConfig {
@@ -188,8 +209,24 @@ export function getConfig(): SystemConfig {
     search_region: (row.search_region as string) || "global",
     review_notifications: row.review_notifications !== 0,
     default_review_interval_preset: (row.default_review_interval_preset as string) || "standard",
+    validator_enabled: row.validator_enabled !== 0,
+    validator_llm_provider: (row.validator_llm_provider as string) || "",
+    validator_llm_api_key: (row.validator_llm_api_key as string) || "",
+    validator_llm_base_url: (row.validator_llm_base_url as string) || "",
+    validator_llm_model: (row.validator_llm_model as string) || "",
+    default_post_stage_review_enabled: row.default_post_stage_review_enabled !== 0,
+    default_answer_time_limit_enabled: row.default_answer_time_limit_enabled !== 0,
+    default_answer_time_limit_seconds: (row.default_answer_time_limit_seconds as number) || 120,
   };
 }
+
+const CONFIG_BOOL_KEYS = new Set([
+  "proxy_enabled",
+  "review_notifications",
+  "validator_enabled",
+  "default_post_stage_review_enabled",
+  "default_answer_time_limit_enabled",
+]);
 
 export function updateConfig(config: Partial<SystemConfig>) {
   const db = getDb();
@@ -197,7 +234,7 @@ export function updateConfig(config: Partial<SystemConfig>) {
   const values: unknown[] = [];
 
   for (const [key, value] of Object.entries(config)) {
-    if (key === "proxy_enabled") {
+    if (CONFIG_BOOL_KEYS.has(key)) {
       fields.push(`${key} = ?`);
       values.push(value ? 1 : 0);
     } else if (key === "quality_sites") {
@@ -268,6 +305,9 @@ function mapPlanRow(row: Record<string, unknown>): LearningPlan {
     career_identity: ((row.career_identity as string) || "") as CareerIdentity,
     architecture_snapshot: (row.architecture_snapshot as string) || "",
     architecture_generated_at: (row.architecture_generated_at as string) || null,
+    post_stage_review_enabled: row.post_stage_review_enabled !== 0,
+    answer_time_limit_enabled: row.answer_time_limit_enabled !== 0,
+    answer_time_limit_seconds: (row.answer_time_limit_seconds as number) || 120,
   };
 }
 
@@ -303,7 +343,8 @@ export function updatePlan(id: string, updates: Partial<LearningPlan>) {
       values.push(JSON.stringify(value || []));
       continue;
     }
-    if (key === "review_enabled" || key === "adaptive_enabled" || key === "analytics_enabled") {
+    if (key === "review_enabled" || key === "adaptive_enabled" || key === "analytics_enabled"
+      || key === "post_stage_review_enabled" || key === "answer_time_limit_enabled") {
       fields.push(`${key} = ?`);
       values.push(value ? 1 : 0);
       continue;
@@ -375,6 +416,7 @@ function mapStageRow(row: Record<string, unknown>): Stage {
     outline_json: (row.outline_json as string) || "",
     outline_confirmed_at: (row.outline_confirmed_at as string) || null,
     learning_started_at: (row.learning_started_at as string) || null,
+    post_review_status: (row.post_review_status as string) || "none",
   } as unknown as Stage;
 }
 
@@ -587,6 +629,12 @@ export function createAssessment(assessment: {
   missing_topics: string[];
   suggestions: (string | AssessmentSuggestion)[];
   per_question_results?: PerQuestionResult[];
+  validator_score_overall?: number | null;
+  validator_passed?: boolean | null;
+  validator_feedback?: string;
+  cross_check_agreed?: boolean | null;
+  timed_out?: boolean;
+  elapsed_seconds?: number | null;
 }): string {
   const db = getDb();
   const existing = db.prepare(
@@ -597,8 +645,11 @@ export function createAssessment(assessment: {
   const id = uuidv4();
 
   db.prepare(
-    `INSERT INTO assessment (id, stage_id, type, input_text, score_overall, score_coverage, score_depth, score_accuracy, passed, feedback, missing_topics, suggestions, per_question_results, attempt_number)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO assessment (
+      id, stage_id, type, input_text, score_overall, score_coverage, score_depth, score_accuracy,
+      passed, feedback, missing_topics, suggestions, per_question_results, attempt_number,
+      validator_score_overall, validator_passed, validator_feedback, cross_check_agreed, timed_out, elapsed_seconds
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     assessment.stage_id,
@@ -613,7 +664,13 @@ export function createAssessment(assessment: {
     JSON.stringify(assessment.missing_topics),
     JSON.stringify(assessment.suggestions),
     JSON.stringify(assessment.per_question_results || []),
-    attemptNumber
+    attemptNumber,
+    assessment.validator_score_overall ?? null,
+    assessment.validator_passed == null ? null : (assessment.validator_passed ? 1 : 0),
+    assessment.validator_feedback || "",
+    assessment.cross_check_agreed == null ? null : (assessment.cross_check_agreed ? 1 : 0),
+    assessment.timed_out ? 1 : 0,
+    assessment.elapsed_seconds ?? null
   );
   return id;
 }
@@ -630,6 +687,12 @@ export function getAssessmentsByStage(stageId: string): Assessment[] {
     missing_topics: parseJsonField(row.missing_topics) as string[],
     suggestions: parseJsonField(row.suggestions) as (string | AssessmentSuggestion)[],
     per_question_results: parseJsonField(row.per_question_results) as PerQuestionResult[],
+    validator_score_overall: (row.validator_score_overall as number) ?? null,
+    validator_passed: row.validator_passed == null ? null : row.validator_passed === 1,
+    validator_feedback: (row.validator_feedback as string) || "",
+    cross_check_agreed: row.cross_check_agreed == null ? null : row.cross_check_agreed === 1,
+    timed_out: row.timed_out === 1,
+    elapsed_seconds: (row.elapsed_seconds as number) ?? null,
   })) as unknown as Assessment[];
 }
 
@@ -707,6 +770,7 @@ export interface ReviewSchedule {
   completed_at: string | null;
   score: number | null;
   created_at: string;
+  review_kind: string;
 }
 
 const REVIEW_INTERVALS: Record<string, number[]> = {
@@ -725,12 +789,45 @@ export function createReviewSchedulesForStage(stageId: string, planId: string, p
     const id = uuidv4();
     const scheduled = new Date(now.getTime() + days * 86400000);
     db.prepare(
-      `INSERT INTO review_schedule (id, stage_id, plan_id, interval_days, scheduled_at, status)
-       VALUES (?, ?, ?, ?, ?, 'pending')`
+      `INSERT INTO review_schedule (id, stage_id, plan_id, interval_days, scheduled_at, status, review_kind)
+       VALUES (?, ?, ?, ?, ?, 'pending', 'spaced')`
     ).run(id, stageId, planId, days, scheduled.toISOString());
     ids.push(id);
   }
   return ids;
+}
+
+export function createPostStageReviewSchedule(stageId: string, planId: string): string {
+  const db = getDb();
+  const existing = db.prepare(
+    `SELECT id FROM review_schedule
+     WHERE stage_id = ? AND review_kind = 'post_stage' AND status IN ('pending', 'expired')
+     ORDER BY created_at DESC LIMIT 1`
+  ).get(stageId) as { id: string } | undefined;
+  if (existing) return existing.id;
+
+  const id = uuidv4();
+  db.prepare(
+    `INSERT INTO review_schedule (id, stage_id, plan_id, interval_days, scheduled_at, status, review_kind)
+     VALUES (?, ?, ?, 0, ?, 'pending', 'post_stage')`
+  ).run(id, stageId, planId, new Date().toISOString());
+  return id;
+}
+
+export function getReviewScheduleById(id: string): ReviewSchedule | null {
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM review_schedule WHERE id = ?").get(id) as ReviewSchedule | undefined;
+  return row || null;
+}
+
+export function getPendingPostStageReview(stageId: string): ReviewSchedule | null {
+  const db = getDb();
+  const row = db.prepare(
+    `SELECT * FROM review_schedule
+     WHERE stage_id = ? AND review_kind = 'post_stage' AND status IN ('pending', 'expired')
+     ORDER BY created_at DESC LIMIT 1`
+  ).get(stageId) as ReviewSchedule | undefined;
+  return row || null;
 }
 
 export function getReviewSchedulesByPlan(planId: string): ReviewSchedule[] {
@@ -775,7 +872,10 @@ export function updateReviewSchedule(id: string, updates: Partial<ReviewSchedule
 export function expireOverdueReviews() {
   const db = getDb();
   db.prepare(
-    "UPDATE review_schedule SET status = 'expired' WHERE status = 'pending' AND scheduled_at < datetime('now', '-3 days')"
+    `UPDATE review_schedule SET status = 'expired'
+     WHERE status = 'pending'
+       AND scheduled_at < datetime('now', '-3 days')
+       AND (review_kind IS NULL OR review_kind = 'spaced')`
   ).run();
 }
 
@@ -795,7 +895,8 @@ export function createReviewSession(session: {
   questions: unknown[];
   score: number;
   duration_minutes: number;
-}): string {
+  timed_out?: boolean;
+}): { id: string; unlockedNext: boolean; postReviewPassed: boolean | null; currentIndex?: number; planId?: string } {
   const db = getDb();
   const id = uuidv4();
   db.prepare(
@@ -803,11 +904,34 @@ export function createReviewSession(session: {
      VALUES (?, ?, ?, ?, ?)`
   ).run(id, session.review_schedule_id, JSON.stringify(session.questions), session.score, session.duration_minutes);
 
+  const schedule = getReviewScheduleById(session.review_schedule_id);
+  if (!schedule) {
+    return { id, unlockedNext: false, postReviewPassed: null };
+  }
+
+  const isPostStage = schedule.review_kind === "post_stage";
+
+  if (isPostStage && session.timed_out) {
+    db.prepare(
+      "UPDATE review_schedule SET status = 'pending', score = ? WHERE id = ?"
+    ).run(session.score, session.review_schedule_id);
+    return { id, unlockedNext: false, postReviewPassed: false };
+  }
+
   db.prepare(
     "UPDATE review_schedule SET status = 'completed', completed_at = datetime('now'), score = ? WHERE id = ?"
   ).run(session.score, session.review_schedule_id);
 
-  return id;
+  if (!isPostStage) {
+    return { id, unlockedNext: false, postReviewPassed: null };
+  }
+
+  const stage = getStage(schedule.stage_id);
+  if (stage) {
+    const passed = session.score >= POST_STAGE_REVIEW_PASS_SCORE;
+    updateStage(stage.id, { post_review_status: passed ? "passed" : "skipped" } as unknown as Stage);
+  }
+  return { id, unlockedNext: false, postReviewPassed: session.score >= POST_STAGE_REVIEW_PASS_SCORE };
 }
 
 export function getReviewSessionsBySchedule(scheduleId: string): ReviewSession[] {
@@ -1648,6 +1772,7 @@ export interface InterviewSession {
   style: string;
   countdown_enabled: boolean;
   countdown_seconds: number;
+  fail_on_timeout: boolean;
   status: string;
   created_at: string;
   updated_at: string;
@@ -1674,6 +1799,7 @@ export function getInterviewSessionByKey(sessionKey: string): InterviewSession |
     ...row,
     plan_ids: parseJsonField(row.plan_ids) as string[],
     countdown_enabled: row.countdown_enabled === 1,
+    fail_on_timeout: row.fail_on_timeout === 1,
   } as unknown as InterviewSession;
 }
 
@@ -1686,12 +1812,13 @@ export function createInterviewSession(session: {
   style?: string;
   countdown_enabled?: boolean;
   countdown_seconds?: number;
+  fail_on_timeout?: boolean;
 }): string {
   const db = getDb();
   const id = uuidv4();
   db.prepare(
-    `INSERT INTO interview_session (id, session_key, scope_type, plan_id, stage_id, plan_ids, style, countdown_enabled, countdown_seconds)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO interview_session (id, session_key, scope_type, plan_id, stage_id, plan_ids, style, countdown_enabled, countdown_seconds, fail_on_timeout)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     session.session_key,
@@ -1701,7 +1828,8 @@ export function createInterviewSession(session: {
     JSON.stringify(session.plan_ids || []),
     session.style || "standard",
     session.countdown_enabled ? 1 : 0,
-    session.countdown_seconds ?? 120
+    session.countdown_seconds ?? 120,
+    session.fail_on_timeout ? 1 : 0
   );
   return id;
 }
@@ -1715,6 +1843,7 @@ export function getOrCreateInterviewSession(params: {
   style?: string;
   countdown_enabled?: boolean;
   countdown_seconds?: number;
+  fail_on_timeout?: boolean;
 }): InterviewSession {
   const existing = getInterviewSessionByKey(params.session_key);
   if (existing) return existing;

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { generatePlanFromBook, extractConcepts, generateStageProject } from "@/lib/ai";
 import { parseLearningMode, parseCareerIdentity } from "@/lib/learning-types";
+import { parseChallengeSettings } from "@/lib/challenge";
 import { createPlan, createStage, updatePlan, getConfig, createConcept, createRelation, createStageProject, getStagesByPlan } from "@/db/queries";
 import { PDFParse } from "pdf-parse";
 
@@ -18,6 +19,11 @@ export async function POST(request: Request) {
     const expected_outcome = formData.get("expected_outcome") as string || "";
     const learning_mode = formData.get("learning_mode") as string | null;
     const career_identity = formData.get("career_identity") as string | null;
+    const challenge = parseChallengeSettings({
+      post_stage_review_enabled: formData.get("post_stage_review_enabled"),
+      answer_time_limit_enabled: formData.get("answer_time_limit_enabled"),
+      answer_time_limit_seconds: formData.get("answer_time_limit_seconds"),
+    });
 
     const resolvedMode = parseLearningMode(learning_mode, "business");
     const resolvedCareer = parseCareerIdentity(career_identity);
@@ -86,6 +92,7 @@ export async function POST(request: Request) {
     updatePlan(planId, {
       total_stages: generated.stages.length,
       started_at: new Date().toISOString(),
+      ...challenge,
     } as unknown as import("@/db/queries").LearningPlan);
 
     for (let i = 0; i < generated.stages.length; i++) {

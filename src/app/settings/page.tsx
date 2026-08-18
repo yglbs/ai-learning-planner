@@ -23,6 +23,14 @@ interface Config {
   proxy_port: number;
   tavily_api_key: string;
   search_region: string;
+  validator_enabled: boolean;
+  validator_llm_provider: string;
+  validator_llm_api_key: string;
+  validator_llm_base_url: string;
+  validator_llm_model: string;
+  default_post_stage_review_enabled: boolean;
+  default_answer_time_limit_enabled: boolean;
+  default_answer_time_limit_seconds: number;
 }
 
 export default function SettingsPage() {
@@ -38,9 +46,18 @@ export default function SettingsPage() {
     proxy_port: 7890,
     tavily_api_key: "",
     search_region: "global",
+    validator_enabled: true,
+    validator_llm_provider: "openai",
+    validator_llm_api_key: "",
+    validator_llm_base_url: "",
+    validator_llm_model: "gpt-4o-mini",
+    default_post_stage_review_enabled: true,
+    default_answer_time_limit_enabled: true,
+    default_answer_time_limit_seconds: 120,
   });
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [tavilyKeyInput, setTavilyKeyInput] = useState("");
+  const [validatorKeyInput, setValidatorKeyInput] = useState("");
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }> | null>(null);
@@ -66,12 +83,22 @@ export default function SettingsPage() {
         proxy_host: config.proxy_host,
         proxy_port: config.proxy_port,
         search_region: config.search_region,
+        validator_enabled: config.validator_enabled,
+        validator_llm_provider: config.validator_llm_provider,
+        validator_llm_base_url: config.validator_llm_base_url,
+        validator_llm_model: config.validator_llm_model,
+        default_post_stage_review_enabled: config.default_post_stage_review_enabled,
+        default_answer_time_limit_enabled: config.default_answer_time_limit_enabled,
+        default_answer_time_limit_seconds: config.default_answer_time_limit_seconds,
       };
       if (apiKeyInput) {
         payload.llm_api_key = apiKeyInput;
       }
       if (tavilyKeyInput) {
         payload.tavily_api_key = tavilyKeyInput;
+      }
+      if (validatorKeyInput) {
+        payload.validator_llm_api_key = validatorKeyInput;
       }
       await fetch("/api/config", {
         method: "PUT",
@@ -81,6 +108,7 @@ export default function SettingsPage() {
       toast.success("设置已保存");
       setApiKeyInput("");
       setTavilyKeyInput("");
+      setValidatorKeyInput("");
       const res = await fetch("/api/config");
       setConfig(await res.json());
     } catch {
@@ -252,6 +280,176 @@ export default function SettingsPage() {
                   留空使用默认地址，如使用代理或转发服务则在此填写
                 </p>
               </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>学习设置</CardTitle>
+              <CardDescription>
+                以下三项默认开启，可随时关闭。终极面试是面试时的风格选项，不在这里开关。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-1 min-w-0">
+                  <Label>阶段后复习</Label>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    阶段通过后生成一轮即时复习，可选做，不挡住下一阶段。此为新建计划默认值。
+                  </p>
+                </div>
+                <Button
+                  variant={config.default_post_stage_review_enabled ? "default" : "outline"}
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => setConfig({ ...config, default_post_stage_review_enabled: !config.default_post_stage_review_enabled })}
+                >
+                  {config.default_post_stage_review_enabled ? "默认开" : "默认关"}
+                </Button>
+              </div>
+              <Separator />
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="space-y-1 min-w-0">
+                    <Label>答题限时失败</Label>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      检测 / 面试 / 复习统计作答时间，超时记失败。此为新建计划默认值。
+                    </p>
+                  </div>
+                  <Button
+                    variant={config.default_answer_time_limit_enabled ? "default" : "outline"}
+                    size="sm"
+                    className="shrink-0"
+                    onClick={() => setConfig({ ...config, default_answer_time_limit_enabled: !config.default_answer_time_limit_enabled })}
+                  >
+                    {config.default_answer_time_limit_enabled ? "默认开" : "默认关"}
+                  </Button>
+                </div>
+                {config.default_answer_time_limit_enabled && (
+                  <div className="flex items-center gap-3">
+                    <Label className="text-xs text-muted-foreground shrink-0">默认秒数</Label>
+                    <Input
+                      type="number"
+                      min={10}
+                      max={3600}
+                      className="h-9 w-28"
+                      value={config.default_answer_time_limit_seconds}
+                      onChange={(e) => setConfig({
+                        ...config,
+                        default_answer_time_limit_seconds: Math.min(3600, Math.max(10, Number(e.target.value) || 120)),
+                      })}
+                    />
+                  </div>
+                )}
+              </div>
+              <Separator />
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-1 min-w-0">
+                  <Label>交叉验证模型</Label>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    检测由第二个模型再评一遍。未单独配验证模型时，会用主模型再评一次。
+                  </p>
+                </div>
+                <Button
+                  variant={config.validator_enabled ? "default" : "outline"}
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => setConfig({ ...config, validator_enabled: !config.validator_enabled })}
+                >
+                  {config.validator_enabled ? "已开启" : "已关闭"}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>交叉验证模型</CardTitle>
+              <CardDescription>
+                检测打分由第二个模型独立再评一遍。两边都通过才算过关，不一致时按更严格结果计分。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between">
+                <Label>启用交叉验证</Label>
+                <Button
+                  variant={config.validator_enabled ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setConfig({ ...config, validator_enabled: !config.validator_enabled })}
+                >
+                  {config.validator_enabled ? "已启用" : "未启用"}
+                </Button>
+              </div>
+              {config.validator_enabled && (
+                <>
+                  <div className="space-y-2">
+                    <Label>验证模型供应商</Label>
+                    <Select
+                      value={config.validator_llm_provider || config.llm_provider}
+                      onValueChange={(v) => {
+                        if (v) {
+                          setConfig({
+                            ...config,
+                            validator_llm_provider: v,
+                            validator_llm_model: modelOptions[v]?.[0]?.value || "",
+                            validator_llm_base_url: "",
+                          });
+                        }
+                      }}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="openai">OpenAI</SelectItem>
+                        <SelectItem value="anthropic">Anthropic</SelectItem>
+                        <SelectItem value="deepseek">DeepSeek</SelectItem>
+                        <SelectItem value="kimi">Kimi (Moonshot)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>验证模型 API Key（可选，留空则复用主模型 Key）</Label>
+                    <Input
+                      type="password"
+                      placeholder={config.validator_llm_api_key || "输入验证模型 API Key..."}
+                      value={validatorKeyInput}
+                      onChange={(e) => setValidatorKeyInput(e.target.value)}
+                    />
+                    {config.validator_llm_api_key && (
+                      <p className="text-xs text-muted-foreground">
+                        当前已配置: {config.validator_llm_api_key}
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <Label>验证模型</Label>
+                    <Select
+                      value={config.validator_llm_model || (modelOptions[config.validator_llm_provider || config.llm_provider]?.[0]?.value || "")}
+                      onValueChange={(v) => { if (v) setConfig({ ...config, validator_llm_model: v }); }}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(modelOptions[config.validator_llm_provider || config.llm_provider] || []).map((m) => (
+                          <SelectItem key={m.value} value={m.value}>
+                            {m.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>验证模型 Base URL（可选）</Label>
+                    <Input
+                      placeholder="留空则按供应商默认地址"
+                      value={config.validator_llm_base_url}
+                      onChange={(e) => setConfig({ ...config, validator_llm_base_url: e.target.value })}
+                    />
+                  </div>
+                </>
+              )}
             </CardContent>
           </Card>
 

@@ -1,8 +1,10 @@
 import { generateObject, generateText } from "ai";
 import { z } from "zod";
-import { getModel, isOpenAICompatibleStructuredFallback } from "@/lib/llm";
+import { getModel, isOpenAICompatibleStructuredFallback, isStructuredFallbackProvider } from "@/lib/llm";
+import type { LanguageModel } from "ai";
 
-function useStructuredTextFallback() {
+function useStructuredTextFallback(providerOverride?: string) {
+  if (providerOverride) return isStructuredFallbackProvider(providerOverride);
   return isOpenAICompatibleStructuredFallback();
 }
 
@@ -19,8 +21,11 @@ function extractJson(text: string): unknown {
   return JSON.parse(text);
 }
 
-async function deepSeekGenerateObject<T>(prompt: string, schemaDescription: string): Promise<T> {
-  const model = getModel();
+async function deepSeekGenerateObject<T>(
+  prompt: string,
+  schemaDescription: string,
+  model: LanguageModel = getModel()
+): Promise<T> {
   const { text } = await generateText({
     model,
     prompt: `${prompt}\n\n请严格按照以下 JSON 格式输出，不要输出任何其他内容：\n${schemaDescription}`,
@@ -432,6 +437,8 @@ export async function assessLearning(params: {
   questions?: string[];
   structured_questions?: AssessmentQuestionInput[];
   answers?: { question: string; answer: string }[];
+  model?: LanguageModel;
+  structuredFallbackProvider?: string;
 }): Promise<AssessmentResult> {
   let answerBlock: string;
 
@@ -488,11 +495,11 @@ ${answerBlock}
    - description: 推荐理由（一句话）
 8. missing_topics 列出未覆盖或理解不足的知识点`;
 
-  if (useStructuredTextFallback()) {
-    return deepSeekGenerateObject<AssessmentResult>(prompt, ASSESS_SCHEMA_DESC);
+  if (useStructuredTextFallback(params.structuredFallbackProvider)) {
+    return deepSeekGenerateObject<AssessmentResult>(prompt, ASSESS_SCHEMA_DESC, params.model ?? getModel());
   }
 
-  const model = getModel();
+  const model = params.model ?? getModel();
   const { object } = await generateObject({
     model,
     schema: assessmentSchema,

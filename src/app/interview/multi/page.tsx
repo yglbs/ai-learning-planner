@@ -14,6 +14,7 @@ import {
   buildCountdownRequestFields,
   DEFAULT_COUNTDOWN_SECONDS,
 } from "@/components/interview-countdown";
+import { INTERVIEW_STYLE_OPTIONS, type InterviewStyleId } from "@/lib/learning-types";
 
 interface PlanSummary {
   id: string;
@@ -28,13 +29,9 @@ interface ChatMsg {
   answer_deadline_at?: string | null;
 }
 
-type InterviewStyle = "friendly" | "standard" | "tough";
+type InterviewStyle = InterviewStyleId;
 
-const STYLES: { id: InterviewStyle; icon: string; name: string; desc: string }[] = [
-  { id: "friendly", icon: "😊", name: "友善引导", desc: "像和同事聊天，轻松愉快" },
-  { id: "standard", icon: "👔", name: "标准技术面", desc: "模拟真实面试流程" },
-  { id: "tough", icon: "🔥", name: "压力面试", desc: "深挖细节，持续追问" },
-];
+const STYLES = INTERVIEW_STYLE_OPTIONS;
 
 export default function MultiInterviewPage() {
   const router = useRouter();
@@ -52,6 +49,7 @@ export default function MultiInterviewPage() {
   const [answerDeadlineAt, setAnswerDeadlineAt] = useState<string | null>(null);
   const [serverNow, setServerNow] = useState<string | null>(null);
   const [isLate, setIsLate] = useState(false);
+  const [failedTimeout, setFailedTimeout] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -86,6 +84,7 @@ export default function MultiInterviewPage() {
     countdown_enabled?: boolean;
     countdown_seconds?: number;
     session_key?: string;
+    failed_timeout?: boolean;
   }) {
     if (reply.session_key) setSessionKey(reply.session_key);
     if (reply.answer_deadline_at !== undefined) setAnswerDeadlineAt(reply.answer_deadline_at || null);
@@ -93,6 +92,7 @@ export default function MultiInterviewPage() {
     if (typeof reply.is_late === "boolean") setIsLate(reply.is_late);
     if (typeof reply.countdown_enabled === "boolean") setCountdownEnabled(reply.countdown_enabled);
     if (typeof reply.countdown_seconds === "number") setCountdownSeconds(reply.countdown_seconds);
+    if (typeof reply.failed_timeout === "boolean") setFailedTimeout(reply.failed_timeout);
   }
 
   async function startInterview(s: InterviewStyle) {
@@ -115,6 +115,7 @@ export default function MultiInterviewPage() {
           plan_ids: selectedIds,
           style: s,
           message: "开始跨计划综合面试",
+          fail_on_timeout: countdownEnabled,
           ...countdown,
         }),
       });
@@ -136,9 +137,10 @@ export default function MultiInterviewPage() {
     }
   }
 
-  async function handleSend() {
-    if (!input.trim() || sending || !sessionKey || !style) return;
-    const msg = input.trim();
+  async function handleSend(forcedMessage?: string) {
+    if (sending || !sessionKey || !style) return;
+    const msg = (forcedMessage ?? input).trim() || "（超时未作答）";
+    if (!forcedMessage && !input.trim()) return;
     setInput("");
     setMessages((prev) => [...prev, { role: "user", content: msg }]);
     setSending(true);
@@ -156,6 +158,7 @@ export default function MultiInterviewPage() {
           session_key: sessionKey,
           message: msg,
           style,
+          fail_on_timeout: countdownEnabled,
           ...countdown,
         }),
       });
@@ -324,6 +327,7 @@ export default function MultiInterviewPage() {
             serverNow={serverNow}
             enabled={countdownEnabled}
             totalSeconds={countdownSeconds}
+            onExpire={() => { void handleSend("（超时未作答）"); }}
           />
           <div className="flex items-center gap-2 shrink-0">
             <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => { setStyle(null); setMessages([]); setSessionKey(null); }}>
@@ -345,7 +349,7 @@ export default function MultiInterviewPage() {
               </Badge>
             ))}
           </div>
-          <InterviewLateBanner isLate={isLate} />
+          <InterviewLateBanner isLate={isLate} failedTimeout={failedTimeout} />
           {messages
             .filter((m) => m.content !== "开始跨计划综合面试")
             .map((msg, i) => (
@@ -405,7 +409,7 @@ export default function MultiInterviewPage() {
               className="flex-1 rounded-xl bg-background/50 border-border/40 focus:border-primary/50 resize-none text-sm"
               disabled={sending}
             />
-            <Button className="h-auto rounded-xl px-6 shrink-0" onClick={handleSend} disabled={!input.trim() || sending}>
+            <Button className="h-auto rounded-xl px-6 shrink-0" onClick={() => handleSend()} disabled={!input.trim() || sending}>
               发送
             </Button>
           </div>

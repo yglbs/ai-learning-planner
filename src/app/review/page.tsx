@@ -29,6 +29,7 @@ import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { InterviewCountdownBar, DEFAULT_COUNTDOWN_SECONDS } from "@/components/interview-countdown";
 
 interface ReviewSchedule {
   id: string;
@@ -40,6 +41,7 @@ interface ReviewSchedule {
   completed_at: string | null;
   score: number | null;
   created_at: string;
+  review_kind?: string;
 }
 
 interface ReviewQuestion {
@@ -60,6 +62,8 @@ interface PlanInfo {
   id: string;
   title: string;
   stages: StageInfo[];
+  answer_time_limit_enabled?: boolean;
+  answer_time_limit_seconds?: number;
 }
 
 type TabValue = "pending" | "upcoming" | "completed";
@@ -145,6 +149,8 @@ function ReviewCenterContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const planIdFilter = searchParams.get("plan_id");
+  const stageIdFilter = searchParams.get("stage_id");
+  const autoStartedRef = useRef(false);
 
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<TabValue>("pending");
@@ -161,7 +167,9 @@ function ReviewCenterContent() {
   const [loadingQuestions, setLoadingQuestions] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [reviewStartTime, setReviewStartTime] = useState<number | null>(null);
+  const [answerDeadlineAt, setAnswerDeadlineAt] = useState<string | null>(null);
   const loadedPlansRef = useRef<Set<string>>(new Set());
+  const submittingRef = useRef(false);
 
   const loadPlanInfo = useCallback(async (planId: string) => {
     if (loadedPlansRef.current.has(planId)) return;
@@ -177,6 +185,8 @@ function ReviewCenterContent() {
             [planId]: {
               id: data.plan.id,
               title: data.plan.title,
+              answer_time_limit_enabled: !!data.plan.answer_time_limit_enabled,
+              answer_time_limit_seconds: data.plan.answer_time_limit_seconds || 120,
               stages: (data.stages || []).map((s: StageInfo) => ({
                 id: s.id,
                 title: s.title,
@@ -195,9 +205,10 @@ function ReviewCenterContent() {
   const fetchReviews = useCallback(async () => {
     setLoading(true);
     try {
-      const url = planIdFilter
-        ? `/api/review?plan_id=${encodeURIComponent(planIdFilter)}`
-        : "/api/review";
+      const params = new URLSearchParams();
+      if (planIdFilter) params.set("plan_id", planIdFilter);
+      if (stageIdFilter) params.set("stage_id", stageIdFilter);
+      const url = params.toString() ? `/api/review?${params.toString()}` : "/api/review";
       const res = await fetch(url);
       if (!res.ok) throw new Error("加载失败");
       const data = await res.json();
@@ -217,11 +228,21 @@ function ReviewCenterContent() {
     } finally {
       setLoading(false);
     }
-  }, [planIdFilter, loadPlanInfo]);
+  }, [planIdFilter, stageIdFilter, loadPlanInfo]);
 
   useEffect(() => {
     fetchReviews();
   }, [fetchReviews]);
+
+  useEffect(() => {
+    if (autoStartedRef.current || loading || !stageIdFilter) return;
+    const target = pending.find(
+      (r) => r.stage_id === stageIdFilter && (r.review_kind === "post_stage" || !r.review_kind)
+    ) || pending.find((r) => r.stage_id === stageIdFilter);
+    if (!target) return;
+    autoStartedRef.current = true;
+    void startReview(target);
+  }, [loading, pending, stageIdFilter]);
 
   const getStageMeta = useCallback(
     (review: ReviewSchedule) => {
@@ -265,6 +286,12 @@ function ReviewCenterContent() {
     setReviewing(true);
     setLoadingQuestions(true);
     setReviewStartTime(Date.now());
+    const plan = planCache[review.plan_id];
+    if (plan?.answer_time_limit_enabled) {
+      setAnswerDeadlineAt(new Date(Date.now() + (plan.answer_time_limit_seconds || DEFAULT_COUNTDOWN_SECONDS) * 1000).toISOString());
+    } else {
+      setAnswerDeadlineAt(null);
+    }
 
     await loadPlanInfo(review.plan_id);
 
@@ -293,22 +320,32 @@ function ReviewCenterContent() {
     setAnswers({});
     setCurrentQuestionIndex(0);
     setReviewStartTime(null);
+    setAnswerDeadlineAt(null);
   }
 
-  async function submitReview(skipQuestions = false) {
-    if (!activeReview) return;
+  async function submitReview(skipQuestions = false, timedOut = false) {
+    if (!activeReview || submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
 
     const durationMinutes = reviewStartTime
       ? Math.max(1, Math.round((Date.now() - reviewStartTime) / 60000))
       : 0;
 
-    const payload = skipQuestions
+    const rawScore = skipQuestions || timedOut ? 0 : calculateScore(questions, answers);
+    const payload = skipQuestions || timedOut
       ? {
           review_schedule_id: activeReview.id,
-          questions: [],
-          score: 0,
+          questions: timedOut
+            ? questions.map((q, i) => ({
+                ...q,
+                user_answer: answers[i] || "",
+                is_correct: false,
+              }))
+            : [],
+          score: rawScore,
           duration_minutes: durationMinutes,
+          timed_out: timedOut,
         }
       : {
           review_schedule_id: activeReview.id,
@@ -317,8 +354,9 @@ function ReviewCenterContent() {
             user_answer: answers[i] || "",
             is_correct: isAnswerCorrect(q, answers[i] || ""),
           })),
-          score: calculateScore(questions, answers),
+          score: rawScore,
           duration_minutes: durationMinutes,
+          timed_out: false,
         };
 
     try {
@@ -331,13 +369,19 @@ function ReviewCenterContent() {
         const err = await res.json();
         throw new Error(err.error || "提交失败");
       }
-
-      toast.success(skipQuestions ? "已标记完成" : `复习完成，得分 ${payload.score} 分`);
+      if (timedOut) {
+        toast.error("复习超时，未通过。请重试。");
+      } else if (skipQuestions) {
+        toast.success("已标记完成");
+      } else {
+        toast.success(`复习完成，得分 ${payload.score} 分`);
+      }
       closeReviewDialog();
       await fetchReviews();
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }
@@ -391,6 +435,11 @@ function ReviewCenterContent() {
               </div>
             </div>
             {renderStatusBadge(review)}
+            {review.review_kind === "post_stage" && (
+              <Badge className="bg-violet-500/15 text-violet-300 border-violet-500/20 hover:bg-violet-500/15">
+                阶段后复习
+              </Badge>
+            )}
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -510,12 +559,22 @@ function ReviewCenterContent() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-primary" />
-              阶段复习
+              {activeReview?.review_kind === "post_stage" ? "阶段后复习" : "阶段复习"}
             </DialogTitle>
             <DialogDescription>
               {activeStageMeta?.stageTitle} · {activeStageMeta?.planTitle}
             </DialogDescription>
           </DialogHeader>
+
+          {activeReview && answerDeadlineAt && (
+            <InterviewCountdownBar
+              answerDeadlineAt={answerDeadlineAt}
+              serverNow={null}
+              enabled
+              totalSeconds={planCache[activeReview.plan_id]?.answer_time_limit_seconds || DEFAULT_COUNTDOWN_SECONDS}
+              onExpire={() => { void submitReview(false, true); }}
+            />
+          )}
 
           {loadingQuestions ? (
             <div className="flex flex-col items-center justify-center py-12 gap-3">

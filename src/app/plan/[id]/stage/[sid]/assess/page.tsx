@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
 import { MarkdownRenderer } from "@/components/markdown-renderer";
+import { InterviewCountdownBar, DEFAULT_COUNTDOWN_SECONDS } from "@/components/interview-countdown";
 
 interface StructuredQuestion {
   type: "choice" | "fill" | "true_false" | "short_answer";
@@ -70,6 +71,12 @@ interface AssessmentResult {
   missing_topics: string[];
   suggestions: (string | Suggestion)[];
   per_question_results?: PerQuestionResult[];
+  timed_out?: boolean;
+  post_review_available?: boolean;
+  post_review_id?: string | null;
+  cross_check_agreed?: boolean | null;
+  validator_score_overall?: number | null;
+  validator_passed?: boolean | null;
 }
 
 type ViewState = "questions" | "assessing" | "result" | "history";
@@ -110,6 +117,11 @@ export default function AssessPage() {
   const [selectedHistory, setSelectedHistory] = useState<HistoricalAssessment | null>(null);
   const [skipConfirm, setSkipConfirm] = useState(false);
   const [skipping, setSkipping] = useState(false);
+  const [timeLimitEnabled, setTimeLimitEnabled] = useState(false);
+  const [timeLimitSeconds, setTimeLimitSeconds] = useState(DEFAULT_COUNTDOWN_SECONDS);
+  const [answerDeadlineAt, setAnswerDeadlineAt] = useState<string | null>(null);
+  const [startedAtMs, setStartedAtMs] = useState<number | null>(null);
+  const submittingRef = useRef(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -125,6 +137,10 @@ export default function AssessPage() {
       if (data?.stages) {
         const found = data.stages.find((s: StageData) => s.id === stageId);
         setStage(found || null);
+        if (data.plan?.answer_time_limit_enabled) {
+          setTimeLimitEnabled(true);
+          setTimeLimitSeconds(data.plan.answer_time_limit_seconds || DEFAULT_COUNTDOWN_SECONDS);
+        }
         if (found && (found.status === "active" || found.status === "completed")) {
           setRegenerating(true);
           try {
@@ -169,6 +185,16 @@ export default function AssessPage() {
     loadData();
   }, [loadData]);
 
+  useEffect(() => {
+    if (viewState !== "questions" || !timeLimitEnabled) {
+      setAnswerDeadlineAt(null);
+      return;
+    }
+    const start = Date.now();
+    setStartedAtMs(start);
+    setAnswerDeadlineAt(new Date(start + timeLimitSeconds * 1000).toISOString());
+  }, [viewState, timeLimitEnabled, timeLimitSeconds]);
+
   const rawQuestions = stage?.assessment_questions?.length
     ? stage.assessment_questions
     : stage?.key_topics.map((t) => `请解释你对「${t}」的理解，以及它在实际项目中是如何被使用的？`) || [];
@@ -178,7 +204,9 @@ export default function AssessPage() {
   const answeredCount = Object.values(answers).filter((a) => a?.trim()).length;
   const allAnswered = answeredCount >= questions.length;
 
-  async function handleSubmit() {
+  async function handleSubmit(timedOut = false) {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     const structuredAnswers = questions.map((q, i) => ({
       type: q.type,
       question: q.question,
@@ -190,10 +218,15 @@ export default function AssessPage() {
     setViewState("assessing");
 
     try {
+      const elapsedSeconds = startedAtMs ? Math.round((Date.now() - startedAtMs) / 1000) : undefined;
       const res = await fetch(`/api/stage/${stageId}/assess`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ structured_answers: structuredAnswers }),
+        body: JSON.stringify({
+          structured_answers: structuredAnswers,
+          timed_out: timedOut,
+          elapsed_seconds: elapsedSeconds,
+        }),
       });
 
       if (!res.ok) {
@@ -207,6 +240,7 @@ export default function AssessPage() {
     } catch (e) {
       toast.error((e as Error).message);
       setViewState("questions");
+      submittingRef.current = false;
     }
   }
 
@@ -225,7 +259,9 @@ export default function AssessPage() {
       }
 
       const data = await res.json();
-      toast.success(data.hasNext ? "已跳过检测，下一阶段已解锁" : "已跳过检测，全部阶段已完成");
+      toast.success(
+        data.hasNext ? "已跳过检测，下一阶段已解锁" : "已跳过检测，全部阶段已完成"
+      );
       router.push(`/plan/${planId}`);
     } catch (e) {
       toast.error((e as Error).message);
@@ -294,6 +330,15 @@ export default function AssessPage() {
             )}
             {viewState === "questions" && (
               <>
+                {timeLimitEnabled && (
+                  <InterviewCountdownBar
+                    answerDeadlineAt={answerDeadlineAt}
+                    serverNow={null}
+                    enabled
+                    totalSeconds={timeLimitSeconds}
+                    onExpire={() => { void handleSubmit(true); }}
+                  />
+                )}
                 <span className="text-xs text-muted-foreground">
                   {answeredCount}/{questions.length} 已答
                 </span>
@@ -409,7 +454,7 @@ export default function AssessPage() {
                       ) : (
                         <Button
                           size="sm"
-                          onClick={handleSubmit}
+                          onClick={() => handleSubmit(false)}
                           disabled={!allAnswered}
                           className="glow-primary"
                         >
@@ -424,7 +469,7 @@ export default function AssessPage() {
               {allAnswered && (
                 <Button
                   className="w-full h-12 text-base font-medium rounded-xl glow-primary"
-                  onClick={handleSubmit}
+                  onClick={() => handleSubmit(false)}
                 >
                   提交检测 ({answeredCount}/{questions.length} 题已答)
                 </Button>
@@ -545,11 +590,20 @@ export default function AssessPage() {
                       {result.passed ? "🎉" : "💪"}
                     </div>
                     <h2 className="text-2xl font-bold gradient-text">
-                      {result.passed ? "恭喜通过！" : "继续加油！"}
+                      {result.timed_out ? "答题超时，未通过" : result.passed ? "恭喜通过！" : "继续加油！"}
                     </h2>
                     <p className="text-muted-foreground mt-1">
                       综合评分: <span className="text-primary font-semibold">{Math.round(result.score_overall)}</span> / 100
                     </p>
+                    {result.cross_check_agreed != null && (
+                      <p className="text-xs mt-2 text-muted-foreground">
+                        交叉验证：{result.cross_check_agreed ? "两个模型结论一致" : "两个模型结论不一致，已按更严格结果计分"}
+                        {result.validator_score_overall != null ? `（验证分 ${Math.round(result.validator_score_overall)}）` : ""}
+                      </p>
+                    )}
+                    {result.post_review_available && result.passed && (
+                      <p className="text-xs mt-2 text-muted-foreground">可选：去做一轮本阶段复习巩固，不影响继续往下学。</p>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-3 gap-4">
@@ -640,7 +694,7 @@ export default function AssessPage() {
               )}
 
               {/* Action Buttons */}
-              <div className="flex gap-3">
+              <div className="flex gap-3 flex-wrap">
                 <Button
                   variant="outline"
                   className="h-12 rounded-xl border-border/50 px-6"
@@ -648,9 +702,19 @@ export default function AssessPage() {
                 >
                   {result.passed ? "← 返回关卡地图" : "← 回去复习"}
                 </Button>
+                {result.passed && result.post_review_available && (
+                  <Button
+                    variant="outline"
+                    className="h-12 rounded-xl border-border/50 px-6"
+                    onClick={() => router.push(`/review?plan_id=${planId}&stage_id=${stageId}`)}
+                  >
+                    可选阶段复习
+                  </Button>
+                )}
                 <Button
                   className="flex-1 h-12 rounded-xl glow-primary font-medium"
                   onClick={async () => {
+                    submittingRef.current = false;
                     setRegenerating(true);
                     try {
                       const regenRes = await fetch(`/api/stage/${stageId}/assess`, { method: "PATCH" });

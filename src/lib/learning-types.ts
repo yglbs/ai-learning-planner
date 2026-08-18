@@ -2,6 +2,28 @@ import { z } from "zod";
 
 /** Shared with interview UI; keep in this client-safe module (no DB imports). */
 export const DEFAULT_COUNTDOWN_SECONDS = 120;
+export const MIN_ANSWER_SECONDS = 10;
+export const MAX_ANSWER_SECONDS = 3600;
+export const POST_STAGE_REVIEW_PASS_SCORE = 60;
+
+export const INTERVIEW_STYLE_IDS = ["friendly", "standard", "tough", "ultimate"] as const;
+export type InterviewStyleId = (typeof INTERVIEW_STYLE_IDS)[number];
+
+export const INTERVIEW_STYLE_OPTIONS: { id: InterviewStyleId; icon: string; name: string; desc: string }[] = [
+  { id: "friendly", icon: "😊", name: "友善引导", desc: "像和同事聊天，轻松愉快" },
+  { id: "standard", icon: "👔", name: "标准技术面", desc: "模拟真实面试流程" },
+  { id: "tough", icon: "🔥", name: "压力面试", desc: "深挖细节，持续追问" },
+  { id: "ultimate", icon: "💀", name: "终极难度", desc: "Staff 级事故决策与权衡，默认高压" },
+];
+
+export const POST_REVIEW_STATUSES = ["none", "pending", "passed", "skipped"] as const;
+export type PostReviewStatus = (typeof POST_REVIEW_STATUSES)[number];
+
+export function clampAnswerSeconds(value: unknown, fallback: number = DEFAULT_COUNTDOWN_SECONDS): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(MAX_ANSWER_SECONDS, Math.max(MIN_ANSWER_SECONDS, Math.round(n)));
+}
 
 export const LEARNING_MODES = ["business", "technical", "business_through_tech"] as const;
 export type LearningMode = (typeof LEARNING_MODES)[number];

@@ -9,13 +9,22 @@ export const PROVIDER_DEFAULT_BASE_URLS: Record<string, string> = {
   kimi: "https://api.moonshot.cn/v1",
 };
 
-export function isOpenAICompatibleStructuredFallback() {
-  const provider = getConfig().llm_provider;
+export interface LlmConnection {
+  llm_provider: string;
+  llm_api_key: string;
+  llm_base_url: string;
+  llm_model: string;
+}
+
+export function isStructuredFallbackProvider(provider: string) {
   return provider === "deepseek" || provider === "kimi";
 }
 
-export function getModel() {
-  const config = getConfig();
+export function isOpenAICompatibleStructuredFallback() {
+  return isStructuredFallbackProvider(getConfig().llm_provider);
+}
+
+export function createModelFromConnection(config: LlmConnection) {
   if (!config.llm_api_key) {
     throw new Error("请先在设置页面配置 API Key");
   }
@@ -49,4 +58,30 @@ export function getModel() {
     ...(config.llm_base_url ? { baseURL: config.llm_base_url } : {}),
   });
   return openai(config.llm_model || "gpt-4o-mini");
+}
+
+export function getModel() {
+  return createModelFromConnection(getConfig());
+}
+
+export function getValidatorConnection(): LlmConnection | null {
+  const config = getConfig();
+  if (!config.validator_enabled) return null;
+  const apiKey = config.validator_llm_api_key || config.llm_api_key;
+  if (!apiKey) return null;
+  const provider = config.validator_llm_provider || config.llm_provider;
+  return {
+    llm_provider: provider,
+    llm_api_key: apiKey,
+    llm_base_url:
+      config.validator_llm_base_url
+      || (provider === config.llm_provider ? config.llm_base_url : ""),
+    llm_model: config.validator_llm_model || config.llm_model,
+  };
+}
+
+export function getValidatorModel() {
+  const connection = getValidatorConnection();
+  if (!connection) return null;
+  return createModelFromConnection(connection);
 }

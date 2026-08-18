@@ -7,7 +7,7 @@ import {
 import {
   getMultiInterviewSessionKey,
   getInterviewHistory,
-  resolveCountdown,
+  resolveInterviewCountdown,
   runInterviewExchange,
 } from "@/lib/interview-handler";
 import { serverNowIso } from "@/lib/interview-countdown";
@@ -24,7 +24,8 @@ const createSchema = z.object({
   plan_ids: z.array(z.string().uuid()).min(MULTI_PLAN_MIN).max(MULTI_PLAN_MAX),
   style: z.string().max(32).default("standard"),
   countdown_enabled: z.boolean().optional(),
-  countdown_seconds: z.number().int().min(10).max(600).optional(),
+  countdown_seconds: z.number().int().min(10).max(3600).optional(),
+  fail_on_timeout: z.boolean().optional(),
   message: z.string().max(5000).optional(),
 });
 
@@ -33,7 +34,8 @@ const continueSchema = z.object({
   message: z.string().min(1).max(5000),
   style: z.string().max(32).optional(),
   countdown_enabled: z.boolean().optional(),
-  countdown_seconds: z.number().int().min(10).max(600).optional(),
+  countdown_seconds: z.number().int().min(10).max(3600).optional(),
+  fail_on_timeout: z.boolean().optional(),
   elapsed_seconds: z.number().optional(),
 });
 
@@ -108,7 +110,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "请求无效" }, { status: 400 });
     }
 
-    const { plan_ids, style, countdown_enabled, countdown_seconds, message } = createParsed.data;
+    const { plan_ids, style, countdown_enabled, countdown_seconds, fail_on_timeout, message } = createParsed.data;
     const { blocks, missingPlanIds } = buildMultiPlanContexts(plan_ids);
 
     if (missingPlanIds.length > 0) {
@@ -116,7 +118,8 @@ export async function POST(request: Request) {
     }
 
     const sessionKey = getMultiInterviewSessionKey(plan_ids, style);
-    const countdown = resolveCountdown({ countdown_enabled, countdown_seconds });
+    const firstPlan = getPlan(plan_ids[0] || "");
+    const countdown = resolveInterviewCountdown(firstPlan, { countdown_enabled, countdown_seconds, fail_on_timeout });
 
     const session = getOrCreateInterviewSession({
       session_key: sessionKey,
@@ -125,6 +128,7 @@ export async function POST(request: Request) {
       style,
       countdown_enabled: countdown.enabled,
       countdown_seconds: countdown.seconds,
+      fail_on_timeout: countdown.failOnTimeout,
     });
 
     const planPromptBlocks = planBlocksFromContext(blocks);

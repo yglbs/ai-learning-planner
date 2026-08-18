@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { generatePlan, extractConcepts, generateStageProject } from "@/lib/ai";
 import { parseLearningMode, parseCareerIdentity } from "@/lib/learning-types";
+import { parseChallengeSettings } from "@/lib/challenge";
 import { createPlan, createStage, createResource, updatePlan, getConfig, createConcept, createRelation, createStageProject } from "@/db/queries";
 import { searchTavily } from "@/lib/datasource";
 
@@ -11,6 +12,7 @@ export async function POST(request: Request) {
       goal, duration_weeks, daily_hours, skill_level, constraints,
       motivation, background, expected_outcome,
       learning_mode, career_identity,
+      post_stage_review_enabled, answer_time_limit_enabled, answer_time_limit_seconds,
     } = body;
 
     const resolvedMode = parseLearningMode(learning_mode, "business");
@@ -45,6 +47,11 @@ export async function POST(request: Request) {
     updatePlan(planId, {
       total_stages: generated.stages.length,
       started_at: new Date().toISOString(),
+      ...parseChallengeSettings({
+        post_stage_review_enabled,
+        answer_time_limit_enabled,
+        answer_time_limit_seconds,
+      }),
     } as unknown as import("@/db/queries").LearningPlan);
 
     const config = getConfig();
