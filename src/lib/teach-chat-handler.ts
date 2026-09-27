@@ -1,5 +1,7 @@
 import { generateText } from "ai";
 import { getModel } from "@/lib/llm";
+import { readableSourceRoot } from "@/lib/local-source";
+import { agentLoopBudget, runLocalAgent } from "@/lib/pi-agent";
 import {
   getChatHistory,
   addChatMessage,
@@ -75,6 +77,8 @@ export async function handleTeachChatPost(params: {
   stage: Stage;
   plan: LearningPlan | null;
   message: string;
+  mode?: "agent" | "chat";
+  onTrace?: (text: string) => void;
 }): Promise<{ role: "assistant"; content: string; sources?: GroundedSourceBundle }> {
   validateTeachChatRequest({ stage: params.stage, message: params.message });
 
@@ -103,12 +107,51 @@ export async function handleTeachChatPost(params: {
     content: m.content,
   }));
 
-  const model = getModel();
-  const { text } = await generateText({
-    model,
-    system: systemPrompt,
-    messages: chatMessages,
-  });
+  const sourceRoot = readableSourceRoot(params.plan);
+  const materialNote = params.plan?.source_type === "book"
+    ? "\n本地书籍全文在 book.txt。讲解前用工具分段阅读，不要只凭书名发挥。"
+    : params.plan?.source_type === "code"
+      ? "\n当前目录就是学员的代码仓库。材料里没出现的文件，用工具打开后再讲。"
+      : "";
+  const priorMessages = chatMessages.slice(0, -1);
+  const latestMessage = chatMessages[chatMessages.length - 1]?.content || params.message;
+
+  let text: string;
+  const useAgent = params.mode === "agent" && !!sourceRoot;
+  if (useAgent && sourceRoot) {
+    try {
+      const result = await runLocalAgent({
+        root: sourceRoot,
+        systemPrompt: systemPrompt + materialNote,
+        prompt: latestMessage,
+        history: priorMessages,
+        ...agentLoopBudget("chat"),
+        onTrace: params.onTrace,
+      });
+      text = result.text;
+    } catch (agentError) {
+      console.error("Teach chat agent loop failed, falling back:", agentError);
+      params.onTrace?.("未走完 agent loop，已改用一次性回复");
+      const model = getModel();
+      const fallback = await generateText({
+        model,
+        system: systemPrompt,
+        messages: chatMessages,
+      });
+      text = fallback.text;
+    }
+  } else {
+    if (params.mode === "agent" && !sourceRoot) {
+      params.onTrace?.("当前计划没有可读取的本地代码或书籍，已改用一次性回复");
+    }
+    const model = getModel();
+    const fallback = await generateText({
+      model,
+      system: systemPrompt,
+      messages: chatMessages,
+    });
+    text = fallback.text;
+  }
 
   addChatMessage(params.stageId, "assistant", text);
 

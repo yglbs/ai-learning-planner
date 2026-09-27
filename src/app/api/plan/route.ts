@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getActivePlan, getAllPlans, getPlan, getStagesByPlan, syncStageUnlockState, updatePlan } from "@/db/queries";
+import { getActivePlan, getAllPlans, getPlan, getStagesByPlan, syncStageUnlockState, updatePlan, deletePlan } from "@/db/queries";
+import { isManagedBookDir, removeSourceDir } from "@/lib/local-source";
 import {
   defaultLearningMode,
   parseCareerIdentity,
@@ -102,5 +103,30 @@ export async function PATCH(request: Request) {
   } catch (e) {
     console.error("[plan] PATCH failed:", e);
     return NextResponse.json({ error: "更新计划失败" }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const id = new URL(request.url).searchParams.get("id");
+    if (!id) {
+      return NextResponse.json({ error: "缺少计划 id" }, { status: 400 });
+    }
+    const plan = getPlan(id);
+    if (!plan) {
+      return NextResponse.json({ error: "计划不存在" }, { status: 404 });
+    }
+    deletePlan(id);
+    if (plan.source_type === "book" && isManagedBookDir(plan.source_path || "")) {
+      try {
+        removeSourceDir(plan.source_path);
+      } catch (e) {
+        console.error("[plan] book files cleanup failed:", e);
+      }
+    }
+    return NextResponse.json({ ok: true });
+  } catch (e) {
+    console.error("[plan] DELETE failed:", e);
+    return NextResponse.json({ error: "删除计划失败" }, { status: 500 });
   }
 }

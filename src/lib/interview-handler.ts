@@ -66,12 +66,15 @@ export function resolveInterviewCountdown(
   plan: Pick<LearningPlan, "answer_time_limit_enabled" | "answer_time_limit_seconds"> | null,
   body: InterviewPostBody
 ): { enabled: boolean; seconds: number; failOnTimeout: boolean } {
-  const planLimit = plan ? resolvePlanTimeLimit(plan) : { enabled: false, seconds: DEFAULT_COUNTDOWN_SECONDS };
-  if (planLimit.enabled) {
+  // Plan "答题限时" is the single source of truth when a plan is bound.
+  // Previously, plan-off still allowed body/session to keep countdown on, so
+  // turning off the plan switch left stale interview timers running.
+  if (plan) {
+    const planLimit = resolvePlanTimeLimit(plan);
     return {
-      enabled: true,
+      enabled: planLimit.enabled,
       seconds: planLimit.seconds,
-      failOnTimeout: true,
+      failOnTimeout: planLimit.enabled,
     };
   }
   const requested = resolveCountdown(body);

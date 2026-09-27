@@ -118,8 +118,8 @@ export async function POST(request: Request) {
     }
 
     const sessionKey = getMultiInterviewSessionKey(plan_ids, style);
-    const firstPlan = getPlan(plan_ids[0] || "");
-    const countdown = resolveInterviewCountdown(firstPlan, { countdown_enabled, countdown_seconds, fail_on_timeout });
+    // Multi-plan interview has no single plan switch — honor the page toggle.
+    const countdown = resolveInterviewCountdown(null, { countdown_enabled, countdown_seconds, fail_on_timeout });
 
     const session = getOrCreateInterviewSession({
       session_key: sessionKey,
@@ -163,12 +163,12 @@ export async function POST(request: Request) {
 }
 
 async function handleMultiContinue(data: z.infer<typeof continueSchema>) {
-  const session = getInterviewSessionByKey(data.session_key);
-  if (!session) {
+  const existing = getInterviewSessionByKey(data.session_key);
+  if (!existing) {
     return NextResponse.json({ error: "会话不存在" }, { status: 404 });
   }
 
-  const planIds = session.plan_ids;
+  const planIds = existing.plan_ids;
   if (planIds.length < MULTI_PLAN_MIN) {
     return NextResponse.json({ error: "无效的多计划会话" }, { status: 400 });
   }
@@ -178,7 +178,22 @@ async function handleMultiContinue(data: z.infer<typeof continueSchema>) {
     return NextResponse.json({ error: "会话关联的计划已失效" }, { status: 404 });
   }
 
-  const style = data.style || session.style;
+  const style = data.style || existing.style;
+  const countdown = resolveInterviewCountdown(null, {
+    countdown_enabled: data.countdown_enabled,
+    countdown_seconds: data.countdown_seconds,
+    fail_on_timeout: data.fail_on_timeout,
+  });
+  const session = getOrCreateInterviewSession({
+    session_key: data.session_key,
+    scope_type: "multi",
+    plan_ids: planIds,
+    style,
+    countdown_enabled: countdown.enabled,
+    countdown_seconds: countdown.seconds,
+    fail_on_timeout: countdown.failOnTimeout,
+  });
+
   const planPromptBlocks = planBlocksFromContext(blocks);
 
   const learningModes: LearningMode[] = planIds.map((pid) =>

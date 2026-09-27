@@ -29,6 +29,9 @@ export interface SystemConfig {
   default_post_stage_review_enabled: boolean;
   default_answer_time_limit_enabled: boolean;
   default_answer_time_limit_seconds: number;
+  pi_code_max_tool_calls: number;
+  pi_book_max_tool_calls: number;
+  pi_chat_max_tool_calls: number;
 }
 
 export type LearningMode = "business" | "technical" | "business_through_tech";
@@ -162,6 +165,12 @@ export interface SearchCacheEntry {
   expires_at: string;
 }
 
+function clampToolCalls(value: unknown, fallback: number): number {
+  const n = typeof value === "number" ? value : parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(80, Math.max(1, Math.round(n)));
+}
+
 function parseJsonField(value: unknown, fallback: unknown[] = []): unknown[] {
   if (!value || value === "") return fallback;
   try {
@@ -217,6 +226,9 @@ export function getConfig(): SystemConfig {
     default_post_stage_review_enabled: row.default_post_stage_review_enabled !== 0,
     default_answer_time_limit_enabled: row.default_answer_time_limit_enabled !== 0,
     default_answer_time_limit_seconds: (row.default_answer_time_limit_seconds as number) || 120,
+    pi_code_max_tool_calls: clampToolCalls(row.pi_code_max_tool_calls, 20),
+    pi_book_max_tool_calls: clampToolCalls(row.pi_book_max_tool_calls, 16),
+    pi_chat_max_tool_calls: clampToolCalls(row.pi_chat_max_tool_calls, 8),
   };
 }
 
@@ -227,6 +239,12 @@ const CONFIG_BOOL_KEYS = new Set([
   "default_post_stage_review_enabled",
   "default_answer_time_limit_enabled",
 ]);
+
+const CONFIG_TOOL_CALL_KEYS: Record<string, number> = {
+  pi_code_max_tool_calls: 20,
+  pi_book_max_tool_calls: 16,
+  pi_chat_max_tool_calls: 8,
+};
 
 export function updateConfig(config: Partial<SystemConfig>) {
   const db = getDb();
@@ -240,6 +258,9 @@ export function updateConfig(config: Partial<SystemConfig>) {
     } else if (key === "quality_sites") {
       fields.push(`${key} = ?`);
       values.push(JSON.stringify(value));
+    } else if (key in CONFIG_TOOL_CALL_KEYS) {
+      fields.push(`${key} = ?`);
+      values.push(clampToolCalls(value, CONFIG_TOOL_CALL_KEYS[key]));
     } else {
       fields.push(`${key} = ?`);
       values.push(value);
@@ -329,6 +350,46 @@ export function getAllPlans(): LearningPlan[] {
   const db = getDb();
   const rows = db.prepare("SELECT * FROM learning_plan ORDER BY created_at DESC").all() as Record<string, unknown>[];
   return rows.map(mapPlanRow);
+}
+
+export function deletePlan(id: string): boolean {
+  const db = getDb();
+  const existing = db.prepare("SELECT id FROM learning_plan WHERE id = ?").get(id);
+  if (!existing) return false;
+
+  const stageIds = (
+    db.prepare("SELECT id FROM stage WHERE plan_id = ?").all(id) as { id: string }[]
+  ).map((row) => row.id);
+
+  const run = db.transaction(() => {
+    for (const stageId of stageIds) {
+      db.prepare("DELETE FROM teaching_chat WHERE stage_id = ? OR stage_id GLOB ?").run(
+        stageId,
+        `stage_interview_${stageId}_*`
+      );
+    }
+    db.prepare("DELETE FROM teaching_chat WHERE stage_id GLOB ?").run(`interview_${id}_*`);
+
+    const sessionSql = stageIds.length
+      ? `SELECT id, session_key FROM interview_session
+         WHERE plan_id = ?
+            OR stage_id IN (${stageIds.map(() => "?").join(",")})
+            OR instr(plan_ids, ?) > 0`
+      : `SELECT id, session_key FROM interview_session
+         WHERE plan_id = ? OR instr(plan_ids, ?) > 0`;
+    const sessions = db.prepare(sessionSql).all(
+      ...(stageIds.length ? [id, ...stageIds, `"${id}"`] : [id, `"${id}"`])
+    ) as { id: string; session_key: string }[];
+
+    for (const session of sessions) {
+      db.prepare("DELETE FROM teaching_chat WHERE stage_id = ?").run(session.session_key);
+      db.prepare("DELETE FROM interview_session WHERE id = ?").run(session.id);
+    }
+
+    db.prepare("DELETE FROM learning_plan WHERE id = ?").run(id);
+  });
+  run();
+  return true;
 }
 
 export function updatePlan(id: string, updates: Partial<LearningPlan>) {
@@ -1834,6 +1895,27 @@ export function createInterviewSession(session: {
   return id;
 }
 
+export function updateInterviewSessionCountdown(
+  sessionId: string,
+  settings: {
+    countdown_enabled: boolean;
+    countdown_seconds: number;
+    fail_on_timeout: boolean;
+  }
+): void {
+  const db = getDb();
+  db.prepare(
+    `UPDATE interview_session
+     SET countdown_enabled = ?, countdown_seconds = ?, fail_on_timeout = ?, updated_at = datetime('now')
+     WHERE id = ?`
+  ).run(
+    settings.countdown_enabled ? 1 : 0,
+    settings.countdown_seconds,
+    settings.fail_on_timeout ? 1 : 0,
+    sessionId
+  );
+}
+
 export function getOrCreateInterviewSession(params: {
   session_key: string;
   scope_type: string;
@@ -1846,7 +1928,24 @@ export function getOrCreateInterviewSession(params: {
   fail_on_timeout?: boolean;
 }): InterviewSession {
   const existing = getInterviewSessionByKey(params.session_key);
-  if (existing) return existing;
+  if (existing) {
+    const nextEnabled = params.countdown_enabled === true;
+    const nextSeconds = params.countdown_seconds ?? existing.countdown_seconds;
+    const nextFail = params.fail_on_timeout === true;
+    if (
+      existing.countdown_enabled !== nextEnabled
+      || existing.countdown_seconds !== nextSeconds
+      || existing.fail_on_timeout !== nextFail
+    ) {
+      updateInterviewSessionCountdown(existing.id, {
+        countdown_enabled: nextEnabled,
+        countdown_seconds: nextSeconds,
+        fail_on_timeout: nextFail,
+      });
+      return getInterviewSessionByKey(params.session_key)!;
+    }
+    return existing;
+  }
   const id = createInterviewSession(params);
   return getInterviewSessionByKey(params.session_key)!;
 }

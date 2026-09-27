@@ -238,9 +238,8 @@
   }
 
   .teach-bubble-ai {
-    background: linear-gradient(145deg, oklch(0.2 0.025 265 / 78%), oklch(0.16 0.02 250 / 62%));
+    background: linear-gradient(145deg, oklch(0.2 0.025 265 / 94%), oklch(0.16 0.02 250 / 92%));
     border: 1px solid oklch(1 0.01 270 / 10%);
-    backdrop-filter: blur(14px);
     box-shadow: 0 8px 28px oklch(0 0 0 / 18%), inset 0 1px 0 oklch(1 0 0 / 6%);
   }
 
@@ -266,15 +265,14 @@
   }
 
   .teach-input-dock {
-    background: linear-gradient(180deg, oklch(0.14 0.02 265 / 40%), oklch(0.12 0.02 265 / 85%));
-    backdrop-filter: blur(16px);
+    background: linear-gradient(180deg, oklch(0.14 0.02 265 / 92%), oklch(0.12 0.02 265 / 96%));
     border-top: 1px solid oklch(1 0.01 270 / 8%);
   }
 }
 
 @keyframes teachFloat {
-  0%, 100% { transform: translateY(0) scale(1); }
-  50% { transform: translateY(-18px) scale(1.04); }
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-12px); }
 }
 
 /* KaTeX overrides for dark theme */

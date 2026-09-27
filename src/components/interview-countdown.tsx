@@ -40,6 +40,8 @@ interface InterviewCountdownToggleProps {
   seconds: number;
   onEnabledChange: (v: boolean) => void;
   onSecondsChange: (v: number) => void;
+  /** When set, countdown follows plan「答题限时」and local toggle is disabled. */
+  lockedByPlan?: boolean;
 }
 
 export function InterviewCountdownToggle({
@@ -47,21 +49,31 @@ export function InterviewCountdownToggle({
   seconds,
   onEnabledChange,
   onSecondsChange,
+  lockedByPlan = false,
 }: InterviewCountdownToggleProps) {
   return (
     <div className="glass-card rounded-xl p-4 space-y-3">
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="text-sm font-medium">回答倒计时</p>
-          <p className="text-xs text-muted-foreground mt-0.5">开启后，每题有时限；若计划开启了限时失败，超时本题记为失败</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            {lockedByPlan
+              ? "由计划页「答题限时」控制；关闭后面试内不再限时"
+              : "开启后，每题有时限；若计划开启了限时失败，超时本题记为失败"}
+          </p>
         </div>
         <button
           type="button"
-          onClick={() => onEnabledChange(!enabled)}
+          onClick={() => {
+            if (lockedByPlan) return;
+            onEnabledChange(!enabled);
+          }}
+          disabled={lockedByPlan}
           className={`relative h-7 w-12 rounded-full transition-colors shrink-0 ${
             enabled ? "bg-primary" : "bg-border/60"
-          }`}
+          } ${lockedByPlan ? "opacity-80 cursor-not-allowed" : ""}`}
           aria-pressed={enabled}
+          aria-disabled={lockedByPlan}
         >
           <span
             className={`absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-background transition-transform ${
@@ -78,6 +90,7 @@ export function InterviewCountdownToggle({
             min={MIN_ANSWER_SECONDS}
             max={MAX_ANSWER_SECONDS}
             value={seconds}
+            disabled={lockedByPlan}
             onChange={(e) => onSecondsChange(Math.min(MAX_ANSWER_SECONDS, Math.max(MIN_ANSWER_SECONDS, Number(e.target.value) || DEFAULT_COUNTDOWN_SECONDS)))}
             className="h-9 rounded-lg bg-background/50 border-border/40 w-28 text-sm"
           />

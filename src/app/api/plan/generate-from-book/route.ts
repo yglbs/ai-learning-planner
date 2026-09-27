@@ -1,13 +1,18 @@
 import { NextResponse } from "next/server";
 import { generatePlanFromBook, extractConcepts, generateStageProject } from "@/lib/ai";
+import { generateBookPlanByReading, StageGuideError } from "@/lib/source-agent";
+import { streamNdjson } from "@/lib/agent-stream";
+import { removeSourceDir, saveBookText } from "@/lib/local-source";
 import { parseLearningMode, parseCareerIdentity } from "@/lib/learning-types";
 import { parseChallengeSettings } from "@/lib/challenge";
 import { createPlan, createStage, updatePlan, getConfig, createConcept, createRelation, createStageProject, getStagesByPlan } from "@/db/queries";
 import { PDFParse } from "pdf-parse";
 
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
+  let savedRoot: string | null = null;
+  let planCreated = false;
   try {
     const formData = await request.formData();
     const file = formData.get("file") as File | null;
@@ -17,6 +22,7 @@ export async function POST(request: Request) {
     const motivation = formData.get("motivation") as string || "";
     const background = formData.get("background") as string || "";
     const expected_outcome = formData.get("expected_outcome") as string || "";
+    const focus = (formData.get("focus") as string) || "";
     const learning_mode = formData.get("learning_mode") as string | null;
     const career_identity = formData.get("career_identity") as string | null;
     const challenge = parseChallengeSettings({
@@ -62,9 +68,9 @@ export async function POST(request: Request) {
     }
 
     const bookTitle = file.name.replace(/\.(pdf|txt|md|epub)$/i, "");
-
-    const generated = await generatePlanFromBook({
-      book_content: bookContent,
+    const savedBook = saveBookText(bookTitle, bookContent);
+    savedRoot = savedBook.root;
+    const learner = {
       book_title: bookTitle,
       duration_weeks,
       daily_hours,
@@ -74,20 +80,52 @@ export async function POST(request: Request) {
       expected_outcome,
       learning_mode: resolvedMode,
       career_identity: resolvedCareer,
-    });
+      focus,
+    };
 
+    return streamNdjson(async (send) => {
+    try {
+    let generated;
+    try {
+      const explored = await generateBookPlanByReading({
+        book_root: savedBook.root,
+        ...learner,
+        onTrace: (text) => send({ type: "trace", text }),
+      });
+      generated = explored.plan;
+    } catch (agentError) {
+      if (agentError instanceof StageGuideError) throw agentError;
+      console.error("Local agent loop failed, falling back to book snapshot:", agentError);
+      send({
+        type: "fallback",
+        text: `未走完 agent loop，已改用截断内容：${(agentError as Error).message}`,
+      });
+      generated = await generatePlanFromBook({
+        book_content: bookContent,
+        ...learner,
+      });
+    }
+
+    const focusText = focus.trim().slice(0, 2000);
     const planId = createPlan({
       title: generated.plan_title,
-      goal_description: `阅读学习《${bookTitle}》`,
+      goal_description: focusText
+        ? `阅读学习《${bookTitle}》。学员提示：${focusText}`
+        : `阅读学习《${bookTitle}》`,
       duration_weeks,
       daily_hours,
       skill_level,
       user_motivation: motivation,
       user_background: background,
       expected_outcome,
+      source_type: "book",
+      source_path: savedBook.root,
+      source_file_tree: "book.txt",
+      source_files: [savedBook.relativeFile],
       learning_mode: resolvedMode,
       career_identity: resolvedCareer,
     });
+    planCreated = true;
 
     updatePlan(planId, {
       total_stages: generated.stages.length,
@@ -186,8 +224,14 @@ export async function POST(request: Request) {
       console.error("Project generation failed (non-fatal):", e);
     }
 
-    return NextResponse.json({ planId, plan: generated });
+    send({ type: "done", planId, plan: generated });
+    } catch (error) {
+      if (savedRoot && !planCreated) removeSourceDir(savedRoot);
+      throw error;
+    }
+    });
   } catch (e) {
+    if (savedRoot && !planCreated) removeSourceDir(savedRoot);
     console.error("Book plan generation failed:", e);
     return NextResponse.json(
       { error: (e as Error).message },

@@ -39,6 +39,8 @@ yarn-error.log*
 
 # local data
 /data
+.pnpm-store/
+.tmp-bin/
 
 # typescript
 *.tsbuildinfo

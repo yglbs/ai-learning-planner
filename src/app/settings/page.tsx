@@ -31,6 +31,9 @@ interface Config {
   default_post_stage_review_enabled: boolean;
   default_answer_time_limit_enabled: boolean;
   default_answer_time_limit_seconds: number;
+  pi_code_max_tool_calls: number;
+  pi_book_max_tool_calls: number;
+  pi_chat_max_tool_calls: number;
 }
 
 export default function SettingsPage() {
@@ -54,6 +57,9 @@ export default function SettingsPage() {
     default_post_stage_review_enabled: true,
     default_answer_time_limit_enabled: true,
     default_answer_time_limit_seconds: 120,
+    pi_code_max_tool_calls: 20,
+    pi_book_max_tool_calls: 16,
+    pi_chat_max_tool_calls: 8,
   });
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [tavilyKeyInput, setTavilyKeyInput] = useState("");
@@ -90,6 +96,9 @@ export default function SettingsPage() {
         default_post_stage_review_enabled: config.default_post_stage_review_enabled,
         default_answer_time_limit_enabled: config.default_answer_time_limit_enabled,
         default_answer_time_limit_seconds: config.default_answer_time_limit_seconds,
+        pi_code_max_tool_calls: config.pi_code_max_tool_calls,
+        pi_book_max_tool_calls: config.pi_book_max_tool_calls,
+        pi_chat_max_tool_calls: config.pi_chat_max_tool_calls,
       };
       if (apiKeyInput) {
         payload.llm_api_key = apiKeyInput;
@@ -146,8 +155,9 @@ export default function SettingsPage() {
       { label: "Claude Haiku 3.5", value: "claude-3-5-haiku-20241022" },
     ],
     deepseek: [
-      { label: "DeepSeek Chat (推荐)", value: "deepseek-chat" },
-      { label: "DeepSeek Reasoner", value: "deepseek-reasoner" },
+      { label: "DeepSeek V4 Flash (推荐)", value: "deepseek-v4-flash" },
+      { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro" },
+      { label: "DeepSeek V4 Flash Vision (实验)", value: "deepseek-v4-flash-vision-exp" },
     ],
     kimi: [
       { label: "Kimi K2 (推荐)", value: "kimi-k2-0711-preview" },
@@ -266,7 +276,7 @@ export default function SettingsPage() {
                 <Input
                   placeholder={
                     config.llm_provider === "deepseek"
-                      ? "默认: https://api.deepseek.com/v1"
+                      ? "默认: https://api.deepseek.com"
                       : config.llm_provider === "kimi"
                         ? "默认: https://api.moonshot.cn/v1"
                         : config.llm_provider === "anthropic"
@@ -359,6 +369,38 @@ export default function SettingsPage() {
                   {config.validator_enabled ? "已开启" : "已关闭"}
                 </Button>
               </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Pi 读取上限</CardTitle>
+              <CardDescription>
+                从代码或书籍生成计划时会按对应次数打开本地文件。教学对话只有选 Agent 模式才用下面的次数；Chat 模式只调用一次模型，不读文件。到上限后不再读取，模型用已经读到的内容回答。对话轮数会在这个数字上再加 4。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {[
+                { key: "pi_code_max_tool_calls" as const, label: "从代码生成计划", fallback: 20 },
+                { key: "pi_book_max_tool_calls" as const, label: "上传书籍生成计划", fallback: 16 },
+                { key: "pi_chat_max_tool_calls" as const, label: "教学对话 Agent", fallback: 8 },
+              ].map((item) => (
+                <div key={item.key} className="flex items-center justify-between gap-4">
+                  <Label>{item.label}</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={80}
+                    className="h-9 w-28"
+                    value={config[item.key] ?? item.fallback}
+                    onChange={(e) => setConfig({
+                      ...config,
+                      [item.key]: Math.min(80, Math.max(1, Number(e.target.value) || item.fallback)),
+                    })}
+                  />
+                </div>
+              ))}
+              <p className="text-xs text-muted-foreground">每次列目录、读文件、搜索都算 1 次。范围 1–80。</p>
             </CardContent>
           </Card>
 

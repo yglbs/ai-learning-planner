@@ -3,7 +3,10 @@ import { getStage, getPlan, getChatHistory } from "@/db/queries";
 import {
   handleTeachChatPost,
   TeachChatValidationError,
+  validateTeachChatRequest,
 } from "@/lib/teach-chat-handler";
+import { readableSourceRoot } from "@/lib/local-source";
+import { streamNdjson } from "@/lib/agent-stream";
 
 export async function GET(
   _request: Request,
@@ -32,23 +35,44 @@ export async function POST(
     }
 
     const plan = getPlan(stage.plan_id);
-    let body: { message?: string };
+    let body: { message?: string; mode?: string };
     try {
       body = await request.json();
     } catch {
       return NextResponse.json({ error: "请求格式无效" }, { status: 400 });
     }
 
-    const result = await handleTeachChatPost({
-      stageId: id,
-      stage,
-      plan,
-      message: body.message || "",
-    });
+    const message = body.message || "";
+    const mode = body.mode === "agent" ? "agent" : "chat";
+    validateTeachChatRequest({ stage, message });
+    if (mode !== "agent" || !readableSourceRoot(plan)) {
+      const result = await handleTeachChatPost({
+        stageId: id,
+        stage,
+        plan,
+        message,
+        mode,
+      });
+      return NextResponse.json({
+        role: result.role,
+        content: result.content,
+      });
+    }
 
-    return NextResponse.json({
-      role: result.role,
-      content: result.content,
+    return streamNdjson(async (send) => {
+      const result = await handleTeachChatPost({
+        stageId: id,
+        stage,
+        plan,
+        message,
+        mode: "agent",
+        onTrace: (text) => send({ type: "trace", text }),
+      });
+      send({
+        type: "done",
+        role: result.role,
+        content: result.content,
+      });
     });
   } catch (e) {
     if (e instanceof TeachChatValidationError) {

@@ -211,6 +211,34 @@ export function countProjectFiles(dirPath: string): { files: number; dirs: numbe
   return { files, dirs };
 }
 
+/** Relative paths of readable source files, without loading file contents. */
+export function listProjectSourceFiles(dirPath: string, maxFiles = 3000): string[] {
+  const files: string[] = [];
+
+  function walk(current: string) {
+    if (files.length >= maxFiles) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    const sorted = [...entries].sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of sorted) {
+      if (files.length >= maxFiles) return;
+      if (entry.isDirectory()) {
+        if (IGNORED_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        walk(path.join(current, entry.name));
+      } else if (entry.isFile() && shouldIncludeFile(entry.name)) {
+        files.push(path.relative(dirPath, path.join(current, entry.name)).replace(/\\/g, "/"));
+      }
+    }
+  }
+
+  walk(dirPath);
+  return files;
+}
+
 /** Pick stage-relevant source files and return truncated snippets for teaching. */
 export function loadStageCodeContext(params: {
   sourcePath: string;

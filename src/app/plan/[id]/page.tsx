@@ -25,6 +25,7 @@ import { StageScenariosPanel } from "@/components/stage-scenarios-panel";
 import { LearningModeSwitcher } from "@/components/learning-mode-switcher";
 import type { LearningMode, OutlineStatus } from "@/lib/learning-types";
 import { defaultLearningMode, DEFAULT_COUNTDOWN_SECONDS } from "@/lib/learning-types";
+import { readNdjsonResponse } from "@/lib/agent-stream";
 
 interface Plan {
   id: string;
@@ -133,6 +134,8 @@ export default function PlanDashboard() {
   const [plan, setPlan] = useState<Plan | null>(null);
   const [stages, setStages] = useState<Stage[]>([]);
   const [allPlans, setAllPlans] = useState<PlanSummary[]>([]);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [deletingPlanId, setDeletingPlanId] = useState<string | null>(null);
   const [selectedStageId, setSelectedStageId] = useState<string | null>(null);
   const [resources, setResources] = useState<Resource[]>([]);
   const [loading, setLoading] = useState(true);
@@ -152,6 +155,14 @@ export default function PlanDashboard() {
   const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatSending, setChatSending] = useState(false);
+  const [chatTraces, setChatTraces] = useState<string[]>([]);
+  const [replyMode, setReplyMode] = useState<"agent" | "chat">("agent");
+  const canUseAgent = plan?.source_type === "code" || plan?.source_type === "book";
+
+  useEffect(() => {
+    if (!plan) return;
+    setReplyMode(canUseAgent ? "agent" : "chat");
+  }, [plan?.id, plan?.source_type, canUseAgent]);
   const [chatLoadedFor, setChatLoadedFor] = useState<string | null>(null);
   const [stageNote, setStageNote] = useState({ ai_summary: "", user_notes: "" });
   const [savingNotes, setSavingNotes] = useState(false);
@@ -338,14 +349,16 @@ export default function PlanDashboard() {
   async function sendChatMessage(text: string, stageId?: string) {
     const sid = stageId || selectedStageId;
     if (!sid) return;
+    const mode = replyMode === "agent" && canUseAgent ? "agent" : "chat";
     setChatSending(true);
+    setChatTraces(mode === "agent" ? ["正在连接 Pi agent loop…"] : []);
     setChatMessages((prev) => [...prev, { role: "user", content: text }]);
     setChatInput("");
     try {
       const res = await fetch(`/api/stage/${sid}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text, mode }),
       });
       if (res.status === 403) {
         const err = await res.json().catch(() => ({}));
@@ -356,8 +369,11 @@ export default function PlanDashboard() {
         return;
       }
       if (!res.ok) throw new Error("发送失败");
-      const data = await res.json();
-      setChatMessages((prev) => [...prev, { role: "assistant", content: data.content }]);
+      const data = await readNdjsonResponse(res, (line) => {
+        setChatTraces((prev) => [...prev, line]);
+        setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+      });
+      setChatMessages((prev) => [...prev, { role: "assistant", content: String(data.content || "") }]);
       setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     } catch (e) {
       toast.error((e as Error).message);
@@ -603,6 +619,24 @@ export default function PlanDashboard() {
     article: "📄", video: "🎬", doc: "📚", book: "📖", repo: "💻", paper: "📝",
   };
 
+  async function handleDeletePlan(id: string) {
+    setDeletingPlanId(id);
+    try {
+      const res = await fetch(`/api/plan?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "删除失败");
+      }
+      setAllPlans((prev) => prev.filter((item) => item.id !== id));
+      setPendingDeleteId(null);
+      toast.success("计划已删除");
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setDeletingPlanId(null);
+    }
+  }
+
   return (
     <div className="h-screen flex bg-background">
       {/* ===== 左侧导航栏 ===== */}
@@ -653,13 +687,52 @@ export default function PlanDashboard() {
               <div className="h-px bg-white/10 my-3" />
               <p className="text-[10px] text-white/30 uppercase tracking-wider px-2 mb-2">其他计划</p>
               {allPlans.filter((p) => p.id !== plan.id).map((p) => (
-                <button
-                  key={p.id}
-                  className="w-full text-left px-3 py-2 rounded-lg mb-0.5 text-xs text-white/40 hover:text-white/70 hover:bg-white/5 transition-all truncate"
-                  onClick={() => router.push(`/plan/${p.id}`)}
-                >
-                  {p.status === "completed" ? "✅ " : "📖 "}{p.title}
-                </button>
+                <div key={p.id} className="group mb-0.5">
+                  <div className="flex items-center rounded-lg hover:bg-white/5">
+                    <button
+                      className="min-w-0 flex-1 text-left px-3 py-2 text-xs text-white/40 hover:text-white/70 transition-all truncate"
+                      onClick={() => router.push(`/plan/${p.id}`)}
+                    >
+                      {p.status === "completed" ? "✅ " : "📖 "}{p.title}
+                    </button>
+                    <button
+                      type="button"
+                      className={`shrink-0 mr-1 px-1.5 py-1 text-[10px] rounded transition-opacity ${
+                        pendingDeleteId === p.id
+                          ? "text-red-300/80 opacity-100"
+                          : "text-white/40 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto hover:text-red-300"
+                      }`}
+                      onClick={() => setPendingDeleteId(p.id)}
+                    >
+                      删除
+                    </button>
+                  </div>
+                  {pendingDeleteId === p.id && (
+                    <div className="mx-2 mb-1 rounded-md border border-red-500/25 bg-black/30 px-2 py-2">
+                      <p className="text-[10px] leading-relaxed text-white/70">
+                        删除后无法恢复，阶段、对话和检测记录都会去掉。
+                      </p>
+                      <div className="mt-1.5 flex gap-2">
+                        <button
+                          type="button"
+                          className="text-[10px] text-white/50 hover:text-white/80"
+                          onClick={() => setPendingDeleteId(null)}
+                          disabled={deletingPlanId === p.id}
+                        >
+                          取消
+                        </button>
+                        <button
+                          type="button"
+                          className="text-[10px] text-red-300 hover:text-red-200 disabled:opacity-50"
+                          onClick={() => handleDeletePlan(p.id)}
+                          disabled={deletingPlanId === p.id}
+                        >
+                          {deletingPlanId === p.id ? "删除中…" : "确认删除"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               ))}
             </>
           )}
@@ -1026,12 +1099,25 @@ export default function PlanDashboard() {
                     {chatSending && (
                       <div className="flex justify-start items-end gap-2.5">
                         <TutorAvatarPicker avatarId={avatarId} onSelect={selectAvatar} size="sm" />
-                        <div className="teach-bubble-ai rounded-2xl rounded-bl-md px-4 py-3.5">
-                          <div className="flex gap-1.5">
-                            {[0, 1, 2].map((i) => (
-                              <div key={i} className="w-2 h-2 rounded-full bg-primary/50 animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
-                            ))}
-                          </div>
+                        <div className="teach-bubble-ai rounded-2xl rounded-bl-md px-4 py-3.5 max-w-[72%]">
+                          {chatTraces.length > 0 ? (
+                            <div className="space-y-1.5">
+                              <p className="text-xs font-medium text-primary">Pi agent loop</p>
+                              <div className="max-h-40 overflow-y-auto space-y-1 font-mono text-[11px] text-muted-foreground">
+                                {chatTraces.map((line, i) => (
+                                  <p key={`${i}-${line}`} className={i === chatTraces.length - 1 ? "text-foreground" : ""}>
+                                    {line}
+                                  </p>
+                                ))}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex gap-1.5">
+                              {[0, 1, 2].map((i) => (
+                                <div key={i} className="w-2 h-2 rounded-full bg-primary/50 animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
+                              ))}
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}
@@ -1039,6 +1125,37 @@ export default function PlanDashboard() {
                   </div>
 
                   <div className="relative z-10 shrink-0 teach-input-dock px-6 py-4">
+                    <div className="max-w-3xl mx-auto mb-2.5 flex items-center gap-2">
+                      {([
+                        { id: "agent" as const, label: "Agent" },
+                        { id: "chat" as const, label: "Chat" },
+                      ]).map((item) => {
+                        const disabled = chatSending || (item.id === "agent" && !canUseAgent);
+                        const active = replyMode === item.id;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            disabled={disabled}
+                            onClick={() => setReplyMode(item.id)}
+                            className={`h-7 px-3 rounded-full text-xs font-medium border transition-colors ${
+                              active
+                                ? "bg-primary text-primary-foreground border-primary"
+                                : "bg-background/40 text-muted-foreground border-border/50 hover:text-foreground"
+                            } disabled:opacity-40`}
+                          >
+                            {item.label}
+                          </button>
+                        );
+                      })}
+                      <span className="text-[11px] text-muted-foreground/80">
+                        {replyMode === "agent" && canUseAgent
+                          ? "按设置里的「教学对话 Agent」次数读取本地文件"
+                          : replyMode === "agent"
+                            ? "这个计划没有本地代码或书籍，只能用 Chat"
+                            : "只调用一次模型，不读取本地文件"}
+                      </span>
+                    </div>
                     <div className="flex gap-2.5 max-w-3xl mx-auto items-end">
                       <Textarea
                         ref={inputRef}

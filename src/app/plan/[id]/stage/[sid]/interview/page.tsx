@@ -58,11 +58,11 @@ export default function StageInterviewPage() {
           setStageTitle(stage.title);
           setStageIndex(stage.order_index ?? 0);
         }
-        if (data?.plan?.answer_time_limit_enabled) {
-          setCountdownEnabled(true);
-          setCountdownSeconds(data.plan.answer_time_limit_seconds || DEFAULT_COUNTDOWN_SECONDS);
-          setFailOnTimeout(true);
-        }
+        const enabled = !!data?.plan?.answer_time_limit_enabled;
+        setCountdownEnabled(enabled);
+        setCountdownSeconds(data?.plan?.answer_time_limit_seconds || DEFAULT_COUNTDOWN_SECONDS);
+        setFailOnTimeout(enabled);
+        if (!enabled) setAnswerDeadlineAt(null);
       })
       .catch(() => {});
   }, [planId, stageId]);
@@ -73,11 +73,7 @@ export default function StageInterviewPage() {
       const data = await res.json();
       const history = Array.isArray(data) ? data : Array.isArray(data?.history) ? data.history : [];
       setMessages(history);
-      const lastAssistant = [...history].reverse().find((m: ChatMsg) => m.role === "assistant" && m.answer_deadline_at);
-      if (lastAssistant?.answer_deadline_at) setAnswerDeadlineAt(lastAssistant.answer_deadline_at);
-      if (data?.server_now) setServerNow(data.server_now);
-      if (typeof data?.countdown_enabled === "boolean") setCountdownEnabled(data.countdown_enabled);
-      if (typeof data?.countdown_seconds === "number") setCountdownSeconds(data.countdown_seconds);
+      // Deadline/countdown come from plan setting + live replies, not stale history alone.
     } catch {
       setMessages([]);
     }
@@ -99,10 +95,16 @@ export default function StageInterviewPage() {
     countdown_seconds?: number;
     failed_timeout?: boolean;
   }) {
-    if (reply.answer_deadline_at !== undefined) setAnswerDeadlineAt(reply.answer_deadline_at || null);
+    if (typeof reply.countdown_enabled === "boolean") {
+      setCountdownEnabled(reply.countdown_enabled);
+      setFailOnTimeout(reply.countdown_enabled);
+      if (!reply.countdown_enabled) setAnswerDeadlineAt(null);
+    }
+    if (reply.countdown_enabled !== false && reply.answer_deadline_at !== undefined) {
+      setAnswerDeadlineAt(reply.answer_deadline_at || null);
+    }
     if (reply.server_now) setServerNow(reply.server_now);
     if (typeof reply.is_late === "boolean") setIsLate(reply.is_late);
-    if (typeof reply.countdown_enabled === "boolean") setCountdownEnabled(reply.countdown_enabled);
     if (typeof reply.countdown_seconds === "number") setCountdownSeconds(reply.countdown_seconds);
     if (typeof reply.failed_timeout === "boolean") setFailedTimeout(reply.failed_timeout);
   }
@@ -136,8 +138,12 @@ export default function StageInterviewPage() {
         ]);
       } else {
         setMessages(history);
-        const lastAssistant = [...history].reverse().find((m: ChatMsg) => m.role === "assistant" && m.answer_deadline_at);
-        if (lastAssistant?.answer_deadline_at) setAnswerDeadlineAt(lastAssistant.answer_deadline_at);
+        if (countdownEnabled) {
+          const lastAssistant = [...history].reverse().find((m: ChatMsg) => m.role === "assistant" && m.answer_deadline_at);
+          if (lastAssistant?.answer_deadline_at) setAnswerDeadlineAt(lastAssistant.answer_deadline_at);
+        } else {
+          setAnswerDeadlineAt(null);
+        }
       }
     } catch (e) {
       toast.error((e as Error).message);
@@ -232,6 +238,7 @@ export default function StageInterviewPage() {
             <InterviewCountdownToggle
               enabled={countdownEnabled}
               seconds={countdownSeconds}
+              lockedByPlan
               onEnabledChange={setCountdownEnabled}
               onSecondsChange={setCountdownSeconds}
             />

@@ -5,7 +5,7 @@ import { getConfig } from "@/db/queries";
 export const PROVIDER_DEFAULT_BASE_URLS: Record<string, string> = {
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com",
-  deepseek: "https://api.deepseek.com/v1",
+  deepseek: "https://api.deepseek.com",
   kimi: "https://api.moonshot.cn/v1",
 };
 
@@ -42,7 +42,7 @@ export function createModelFromConnection(config: LlmConnection) {
       apiKey: config.llm_api_key,
       baseURL: config.llm_base_url || PROVIDER_DEFAULT_BASE_URLS.deepseek,
     });
-    return deepseek.chat(config.llm_model || "deepseek-chat");
+    return deepseek.chat(config.llm_model || "deepseek-v4-flash");
   }
 
   if (config.llm_provider === "kimi") {

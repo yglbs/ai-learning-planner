@@ -4,7 +4,7 @@ import { getConfig } from "@/db/queries";
 const PROVIDER_BASE_URLS: Record<string, string> = {
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com",
-  deepseek: "https://api.deepseek.com/v1",
+  deepseek: "https://api.deepseek.com",
   kimi: "https://api.moonshot.cn/v1",
 };
 

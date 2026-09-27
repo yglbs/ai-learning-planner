@@ -13,6 +13,7 @@ import { toast } from "sonner";
 import { PLAN_TEMPLATES } from "@/config/templates";
 import type { CareerIdentity, LearningMode } from "@/lib/learning-types";
 import { defaultLearningMode } from "@/lib/learning-types";
+import { readNdjsonResponse } from "@/lib/agent-stream";
 
 type Step = "template" | "book" | "code" | "customize" | "dialogue" | "generating" | "preview";
 
@@ -89,6 +90,7 @@ export default function NewPlanPage() {
   const [postStageReviewEnabled, setPostStageReviewEnabled] = useState(true);
   const [answerTimeLimitEnabled, setAnswerTimeLimitEnabled] = useState(true);
   const [answerTimeLimitSeconds, setAnswerTimeLimitSeconds] = useState(120);
+  const [sourcePrompt, setSourcePrompt] = useState("");
 
   const [dialogueAnswers, setDialogueAnswers] = useState<Record<string, string>>({
     motivation: "",
@@ -115,6 +117,7 @@ export default function NewPlanPage() {
     plan: { plan_title: string; stages: GeneratedStage[] };
   } | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [agentTraces, setAgentTraces] = useState<string[]>([]);
 
   useEffect(() => {
     fetch("/api/config")
@@ -159,6 +162,11 @@ export default function NewPlanPage() {
 
     setStep("generating");
     setGenerating(true);
+    setAgentTraces(
+      projectPath.trim() || uploadedFile
+        ? ["正在连接 Pi agent loop…"]
+        : [],
+    );
 
     try {
       let res: Response;
@@ -177,6 +185,7 @@ export default function NewPlanPage() {
             motivation: dialogueAnswers.motivation,
             background: dialogueAnswers.background,
             expected_outcome: dialogueAnswers.outcome,
+            focus: sourcePrompt.trim(),
             post_stage_review_enabled: postStageReviewEnabled,
             answer_time_limit_enabled: answerTimeLimitEnabled,
             answer_time_limit_seconds: answerTimeLimitSeconds,
@@ -193,6 +202,7 @@ export default function NewPlanPage() {
         formData.append("motivation", dialogueAnswers.motivation || "");
         formData.append("background", dialogueAnswers.background || "");
         formData.append("expected_outcome", dialogueAnswers.outcome || "");
+        formData.append("focus", sourcePrompt.trim());
         formData.append("post_stage_review_enabled", String(postStageReviewEnabled));
         formData.append("answer_time_limit_enabled", String(answerTimeLimitEnabled));
         formData.append("answer_time_limit_seconds", String(answerTimeLimitSeconds));
@@ -234,8 +244,13 @@ export default function NewPlanPage() {
         throw new Error(errorMsg);
       }
 
-      const data = await res.json();
-      setGeneratedPlan(data);
+      const data = await readNdjsonResponse(res, (text) => {
+        setAgentTraces((prev) => [...prev, text]);
+      });
+      setGeneratedPlan({
+        planId: String(data.planId),
+        plan: data.plan as { plan_title: string; stages: GeneratedStage[] },
+      });
       setStep("preview");
     } catch (e) {
       toast.error((e as Error).message);
@@ -392,7 +407,7 @@ export default function NewPlanPage() {
               <div className="text-center mb-8">
                 <h2 className="text-3xl font-bold gradient-text mb-3">上传书籍</h2>
                 <p className="text-muted-foreground">
-                  上传一本书，AI 会基于书的内容为你生成阶段化学习计划
+                  上传一本书。生成计划时会分段阅读全文，不再只截取前几万字
                 </p>
               </div>
 
@@ -545,7 +560,7 @@ export default function NewPlanPage() {
                     </Button>
                   </div>
                   <p className="text-xs text-muted-foreground/70">
-                    自动忽略 node_modules/.git 等目录；优先读取入口文件与配置，单文件 ≤30KB，总内容约 120KB
+                    会按需打开仓库里的源码（忽略 node_modules、.git 和密钥文件），不再只截取前 120KB
                   </p>
                 </div>
 
@@ -628,7 +643,7 @@ export default function NewPlanPage() {
                       <span className="text-base">💻</span>
                       <span className="text-sm font-medium text-green-400 font-mono truncate">{projectPath}</span>
                       <button
-                        onClick={() => { setProjectPath(""); setProjectValidated(false); setGoal(""); setLearningMode(defaultLearningMode("code")); setStep("code"); }}
+                        onClick={() => { setProjectPath(""); setProjectValidated(false); setGoal(""); setSourcePrompt(""); setLearningMode(defaultLearningMode("code")); setStep("code"); }}
                         className="ml-auto text-xs text-muted-foreground hover:text-foreground shrink-0"
                       >
                         更换
@@ -639,7 +654,7 @@ export default function NewPlanPage() {
                       <span className="text-base">📗</span>
                       <span className="text-sm font-medium text-green-400">{uploadedFile.name}</span>
                       <button
-                        onClick={() => { setUploadedFile(null); setGoal(""); setStep("book"); }}
+                        onClick={() => { setUploadedFile(null); setGoal(""); setSourcePrompt(""); setStep("book"); }}
                         className="ml-auto text-xs text-muted-foreground hover:text-foreground"
                       >
                         更换
@@ -659,6 +674,27 @@ export default function NewPlanPage() {
                     </>
                   )}
                 </div>
+
+                {(projectPath.trim() || uploadedFile) && (
+                  <div className="space-y-2.5">
+                    <Label className="text-base font-medium flex items-center gap-2">
+                      <span className="text-lg">✏️</span> 补充提示
+                    </Label>
+                    <Textarea
+                      placeholder={
+                        projectPath.trim()
+                          ? "例：重点看直播链路和 gRPC 入口，先讲业务接口再讲存储"
+                          : "例：重点看估值方法那一章，跳过前言和附录"
+                      }
+                      value={sourcePrompt}
+                      onChange={(e) => setSourcePrompt(e.target.value)}
+                      className="min-h-24 rounded-xl bg-background/50 border-border/40 focus:border-primary/50"
+                    />
+                    <p className="text-xs text-muted-foreground/70">
+                      会写进生成计划的提示词，用来指定想先看的模块、章节或问题。留空则按材料本身来规划。
+                    </p>
+                  </div>
+                )}
 
                 <div className="space-y-3">
                   <Label className="text-base font-medium flex items-center gap-2">
@@ -1006,7 +1042,13 @@ export default function NewPlanPage() {
             </div>
           )}
 
-          {step === "generating" && <GeneratingView isBook={!!uploadedFile} isCode={!!projectPath.trim()} />}
+          {step === "generating" && (
+            <GeneratingView
+              isBook={!!uploadedFile}
+              isCode={!!projectPath.trim()}
+              traces={agentTraces}
+            />
+          )}
 
           {step === "preview" && generatedPlan && (
             <div className="space-y-6">
@@ -1117,11 +1159,20 @@ const CODE_GENERATING_STEPS = [
   { icon: "✨", text: "即将完成...", duration: 60000 },
 ];
 
-function GeneratingView({ isBook = false, isCode = false }: { isBook?: boolean; isCode?: boolean }) {
+function GeneratingView({
+  isBook = false,
+  isCode = false,
+  traces = [],
+}: {
+  isBook?: boolean;
+  isCode?: boolean;
+  traces?: string[];
+}) {
   const steps = isCode ? CODE_GENERATING_STEPS : isBook ? BOOK_GENERATING_STEPS : GENERATING_STEPS;
   const [elapsed, setElapsed] = useState(0);
   const [progress, setProgress] = useState(0);
   const startRef = useRef(Date.now());
+  const traceRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -1133,6 +1184,10 @@ function GeneratingView({ isBook = false, isCode = false }: { isBook?: boolean; 
     }, 300);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (traceRef.current) traceRef.current.scrollTop = traceRef.current.scrollHeight;
+  }, [traces]);
 
   const currentStep = steps.reduce(
     (acc, s, i) => (elapsed * 1000 >= s.duration ? i : acc),
@@ -1175,6 +1230,20 @@ function GeneratingView({ isBook = false, isCode = false }: { isBook?: boolean; 
         </p>
       </div>
 
+      {(isCode || isBook) ? (
+        <div className="w-full max-w-md space-y-2">
+          <p className="text-xs font-medium text-primary">Pi agent loop 读取记录</p>
+          <div ref={traceRef} className="max-h-56 overflow-y-auto rounded-xl border border-border/40 bg-background/40 px-4 py-3 space-y-1.5 font-mono text-xs">
+            {traces.length === 0 ? (
+              <p className="text-muted-foreground">等待 Pi agent loop…</p>
+            ) : traces.map((line, i) => (
+              <p key={`${i}-${line}`} className={i === traces.length - 1 ? "text-foreground" : "text-muted-foreground"}>
+                {line}
+              </p>
+            ))}
+          </div>
+        </div>
+      ) : (
       <div className="w-full max-w-xs space-y-2.5">
         {steps.slice(0, Math.min(currentStep + 2, steps.length)).map((s, i) => {
           const isDone = i < currentStep;
@@ -1205,6 +1274,7 @@ function GeneratingView({ isBook = false, isCode = false }: { isBook?: boolean; 
           );
         })}
       </div>
+      )}
 
       <p className="text-xs text-muted-foreground/40 max-w-xs text-center">
         {isCode ? "分析代码项目可能需要 1-3 分钟，取决于项目大小" : isBook ? "解析书籍内容可能需要 1-2 分钟" : "首次生成可能需要 30-60 秒，取决于 AI 服务响应速度"}

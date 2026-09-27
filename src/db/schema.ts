@@ -442,6 +442,9 @@ function runMigrations(db: Database.Database) {
   safeAddColumn(db, "system_config", "default_post_stage_review_enabled", "INTEGER DEFAULT 1");
   safeAddColumn(db, "system_config", "default_answer_time_limit_enabled", "INTEGER DEFAULT 1");
   safeAddColumn(db, "system_config", "default_answer_time_limit_seconds", "INTEGER DEFAULT 120");
+  safeAddColumn(db, "system_config", "pi_code_max_tool_calls", "INTEGER DEFAULT 20");
+  safeAddColumn(db, "system_config", "pi_book_max_tool_calls", "INTEGER DEFAULT 16");
+  safeAddColumn(db, "system_config", "pi_chat_max_tool_calls", "INTEGER DEFAULT 8");
 
   safeAddColumn(db, "learning_plan", "post_stage_review_enabled", "INTEGER DEFAULT 1");
   safeAddColumn(db, "learning_plan", "answer_time_limit_enabled", "INTEGER DEFAULT 1");

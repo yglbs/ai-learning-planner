@@ -1,24 +1,12 @@
 import { generateObject, generateText } from "ai";
 import { z } from "zod";
+import { extractJson } from "@/lib/extract-json";
 import { getModel, isOpenAICompatibleStructuredFallback, isStructuredFallbackProvider } from "@/lib/llm";
 import type { LanguageModel } from "ai";
 
 function useStructuredTextFallback(providerOverride?: string) {
   if (providerOverride) return isStructuredFallbackProvider(providerOverride);
   return isOpenAICompatibleStructuredFallback();
-}
-
-function extractJson(text: string): unknown {
-  const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
-  if (fenceMatch) {
-    return JSON.parse(fenceMatch[1].trim());
-  }
-  const braceStart = text.indexOf("{");
-  const braceEnd = text.lastIndexOf("}");
-  if (braceStart !== -1 && braceEnd > braceStart) {
-    return JSON.parse(text.slice(braceStart, braceEnd + 1));
-  }
-  return JSON.parse(text);
 }
 
 async function deepSeekGenerateObject<T>(
@@ -52,7 +40,108 @@ const planSchema = z.object({
 
 export type GeneratedPlan = z.infer<typeof planSchema>;
 
-const PLAN_SCHEMA_DESC = `{
+export function parseGeneratedPlan(text: string): GeneratedPlan {
+  let raw: unknown;
+  try {
+    raw = extractJson(text);
+  } catch {
+    throw new Error("模型没有返回可解析的学习计划 JSON");
+  }
+  const parsed = planSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error("模型返回的学习计划格式不正确");
+  }
+  return parsed.data;
+}
+
+export const PLAN_SKELETON_SCHEMA = `{
+  "plan_title": "计划标题",
+  "stages": [
+    {
+      "title": "具体到模块或业务能力的阶段名",
+      "estimated_days": 7,
+      "key_topics": ["知识点1", "知识点2", "知识点3"],
+      "source_files": ["相对路径1", "相对路径2"]
+    }
+  ]
+}`;
+
+const stageGuideSchema = z.object({
+  description: z.string(),
+  learning_objectives: z.array(z.string()).min(1),
+  summary_text: z.string(),
+  core_output: z.string(),
+  real_world_cases: z.array(z.string()).min(1),
+  assessment_questions: z.array(z.string()).min(1),
+});
+
+export type StageGuide = z.infer<typeof stageGuideSchema>;
+
+const STAGE_GUIDE_SCHEMA = `{
+  "description": "一两句说明这个阶段学什么",
+  "learning_objectives": ["能指着材料说明的目标"],
+  "summary_text": "700到900字导读",
+  "core_output": "学完后的具体产出",
+  "real_world_cases": ["一个和本阶段材料对应的案例"],
+  "assessment_questions": ["只考本阶段知识点的问题"]
+}`;
+
+export function parsePlanSkeleton(text: string): {
+  plan_title: string;
+  stages: { title: string; estimated_days: number; key_topics: string[]; source_files: string[] }[];
+} {
+  const raw = extractJson(text);
+  const parsed = z.object({
+    plan_title: z.string().min(1),
+    stages: z.array(z.object({
+      title: z.string().min(1),
+      estimated_days: z.number(),
+      key_topics: z.array(z.string().min(1)).min(1),
+      source_files: z.array(z.string()).optional(),
+    })).min(1),
+  }).safeParse(raw);
+  if (!parsed.success) {
+    throw new Error("模型没有返回可解析的计划骨架 JSON");
+  }
+  return {
+    plan_title: parsed.data.plan_title,
+    stages: parsed.data.stages.map((stage) => ({
+      title: stage.title,
+      estimated_days: Math.max(1, Math.round(stage.estimated_days) || 1),
+      key_topics: stage.key_topics,
+      source_files: stage.source_files || [],
+    })),
+  };
+}
+
+/** One stage's long fields. The caller retries when the guide is too short or ungrounded. */
+export async function generateStageGuide(prompt: string): Promise<StageGuide> {
+  const { text } = await generateText({
+    model: getModel(),
+    maxOutputTokens: 16384,
+    prompt: `${prompt}\n\n只输出一个 JSON 对象，不要用 Markdown 代码块。summary_text 里不要出现三个反引号：\n${STAGE_GUIDE_SCHEMA}`,
+  });
+  let raw: unknown;
+  try {
+    raw = extractJson(text);
+  } catch (error) {
+    console.error(
+      "[stage-guide] JSON parse failed",
+      `len=${text.length}`,
+      `head=${text.slice(0, 120).replace(/\s+/g, " ")}`,
+      `tail=${text.slice(-120).replace(/\s+/g, " ")}`,
+      error,
+    );
+    throw new Error("阶段导读不是可解析的 JSON");
+  }
+  const parsed = stageGuideSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error("阶段导读格式不正确");
+  }
+  return parsed.data;
+}
+
+export const PLAN_SCHEMA_DESC = `{
   "plan_title": "计划标题",
   "stages": [
     {
@@ -68,6 +157,12 @@ const PLAN_SCHEMA_DESC = `{
     }
   ]
 }`;
+
+function focusInstruction(focus?: string): string {
+  const text = focus?.trim();
+  if (!text) return "";
+  return `\n## 学员补充提示\n${text.slice(0, 2000)}\n优先按这条提示决定先读哪里、阶段怎么拆。材料里没有的内容仍然不要编造。`;
+}
 
 export async function generatePlan(params: {
   goal: string;
@@ -161,8 +256,8 @@ ${params.constraints?.length ? `额外要求: ${params.constraints.join("、")}`
   return object;
 }
 
-export async function generatePlanFromBook(params: {
-  book_content: string;
+export function buildBookPlanPrompt(params: {
+  book_content?: string;
   book_title?: string;
   duration_weeks: number;
   daily_hours: number;
@@ -172,7 +267,12 @@ export async function generatePlanFromBook(params: {
   expected_outcome?: string;
   learning_mode?: string;
   career_identity?: string;
-}): Promise<GeneratedPlan> {
+  focus?: string;
+  /** When true, the book is on disk and the agent must read it with tools. */
+  read_with_tools?: boolean;
+  /** When true, the reply is only the short plan skeleton. Guides are generated later. */
+  skeleton_only?: boolean;
+}): string {
   const levelMap: Record<string, string> = {
     beginner: "零基础入门",
     intermediate: "有一定基础",
@@ -187,9 +287,12 @@ export async function generatePlanFromBook(params: {
     params.career_identity ? `职业定位: ${params.career_identity}` : "",
   ].filter(Boolean).join("\n");
 
-  const bookContentTruncated = params.book_content.length > 50000
-    ? params.book_content.slice(0, 50000) + "\n\n[... 内容过长已截断 ...]"
-    : params.book_content;
+  const bookBody = params.book_content || "";
+  const bookContentTruncated = params.read_with_tools
+    ? "正文没有预先塞进提示词。当前目录里的 book.txt 就是这本书的全文。制定计划前必须用 read_file 和 grep 分段阅读，禁止只凭书名编造章节。"
+    : bookBody.length > 50000
+      ? bookBody.slice(0, 50000) + "\n\n[... 内容过长已截断 ...]"
+      : bookBody;
 
   const prompt = `你是一位学习规划师。用户上传了一本书，请你基于这本书的实际内容，制定一个阶段化的学习计划。
 
@@ -204,6 +307,7 @@ ${bookContentTruncated}
 每日可用学习时间: ${params.daily_hours} 小时
 当前水平: ${levelMap[params.skill_level] || params.skill_level}
 ${contextBlock}
+${focusInstruction(params.focus)}
 
 ## 核心要求
 1. **基于书的实际内容来规划**：阶段划分必须对应书中的实际章节/内容，不要凭空添加书中没有的内容
@@ -223,6 +327,33 @@ ${contextBlock}
     - 类型：一道"为什么"（理解作者的论点），一道"怎么用"（应用层面），一道"如果…会怎样"（延伸思考）
     - 不能出超出对应阶段书本内容的题`;
 
+  if (!params.skeleton_only) return prompt;
+  return `${prompt}
+
+## 这次只输出计划骨架
+上面关于 800 字导读、学习目标、案例和思考题的要求不要写进这次回复。那些内容会按阶段另一次生成。
+最终只输出这个 JSON：
+${PLAN_SKELETON_SCHEMA}
+- 4-6 个阶段，总天数 = ${params.duration_weeks * 7}
+- key_topics 必须是你在 book.txt 里读到的原概念，每阶段 3-6 个
+- source_files 填 ["book.txt"]
+- 不要写 summary_text`;
+}
+
+export async function generatePlanFromBook(params: {
+  book_content: string;
+  book_title?: string;
+  duration_weeks: number;
+  daily_hours: number;
+  skill_level: string;
+  motivation?: string;
+  background?: string;
+  expected_outcome?: string;
+  learning_mode?: string;
+  career_identity?: string;
+  focus?: string;
+}): Promise<GeneratedPlan> {
+  const prompt = buildBookPlanPrompt(params);
   if (useStructuredTextFallback()) {
     return deepSeekGenerateObject<GeneratedPlan>(prompt, PLAN_SCHEMA_DESC);
   }
@@ -236,8 +367,8 @@ ${contextBlock}
   return object;
 }
 
-export async function generatePlanFromCode(params: {
-  code_content: string;
+export function buildCodePlanPrompt(params: {
+  code_content?: string;
   project_name: string;
   file_tree: string;
   duration_weeks: number;
@@ -248,7 +379,12 @@ export async function generatePlanFromCode(params: {
   expected_outcome?: string;
   learning_mode?: string;
   career_identity?: string;
-}): Promise<GeneratedPlan> {
+  focus?: string;
+  /** When true, the repo is on disk and the agent must read it with tools. */
+  read_with_tools?: boolean;
+  /** When true, the reply is only the short plan skeleton. Guides are generated later. */
+  skeleton_only?: boolean;
+}): string {
   const levelMap: Record<string, string> = {
     beginner: "零基础入门",
     intermediate: "有一定基础",
@@ -282,9 +418,12 @@ export async function generatePlanFromCode(params: {
     career ? `职业定位: ${careerLabelMap[career] || career}` : "",
   ].filter(Boolean).join("\n");
 
-  const codeContentTruncated = params.code_content.length > 80000
-    ? params.code_content.slice(0, 80000) + "\n\n[... 代码内容过长已截断 ...]"
-    : params.code_content;
+  const codeBody = params.code_content || "";
+  const codeContentTruncated = params.read_with_tools
+    ? "源码没有预先塞进提示词。当前目录就是这个仓库。制定计划前必须用 list_dir、read_file、grep 阅读真实文件。禁止只凭文件名或目录名编造类、函数或框架能力。"
+    : codeBody.length > 80000
+      ? codeBody.slice(0, 80000) + "\n\n[... 代码内容过长已截断 ...]"
+      : codeBody;
 
   const pathStrategy = (() => {
     if (mode === "business" || mode === "business_through_tech") {
@@ -347,6 +486,7 @@ ${codeContentTruncated}
 每日可用学习时间: ${params.daily_hours} 小时
 当前水平: ${levelMap[params.skill_level] || params.skill_level}
 ${contextBlock}
+${focusInstruction(params.focus)}
 
 ## 核心要求（必须严格执行）
 1. **只讲仓库里真实存在的代码**：阶段划分必须对应实际目录/模块/入口文件，禁止编造不存在的类、接口或框架能力
@@ -364,6 +504,34 @@ ${contextBlock}
 9. 总天数 = ${params.duration_weeks * 7} 天，按每日 ${params.daily_hours} 小时分配 estimated_days
 10. 标题要具体到模块/业务能力，避免「基础入门」「进阶提升」这类空标题`;
 
+  if (!params.skeleton_only) return prompt;
+  return `${prompt}
+
+## 这次只输出计划骨架
+上面关于 800 字导读、学习目标、产出、案例和检测题的要求不要写进这次回复。那些内容会按阶段另一次生成，并且会重新打开 source_files 里的源码。
+最终只输出这个 JSON：
+${PLAN_SKELETON_SCHEMA}
+- 阶段数量和顺序仍按上面的学习路径，总天数 = ${params.duration_weeks * 7}
+- 每个阶段 key_topics 3-6 个，必须能落到你读过的文件
+- source_files 只能填这次 read_file 成功打开过的相对路径，3-8 个，禁止填没打开的文件
+- 标题具体到模块或业务能力，不要用「基础入门」`;
+}
+
+export async function generatePlanFromCode(params: {
+  code_content: string;
+  project_name: string;
+  file_tree: string;
+  duration_weeks: number;
+  daily_hours: number;
+  skill_level: string;
+  motivation?: string;
+  background?: string;
+  expected_outcome?: string;
+  learning_mode?: string;
+  career_identity?: string;
+  focus?: string;
+}): Promise<GeneratedPlan> {
+  const prompt = buildCodePlanPrompt(params);
   if (useStructuredTextFallback()) {
     return deepSeekGenerateObject<GeneratedPlan>(prompt, PLAN_SCHEMA_DESC);
   }

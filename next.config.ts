@@ -2,7 +2,14 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  serverExternalPackages: ["better-sqlite3", "pdf-parse", "pdfjs-dist"],
+  serverExternalPackages: [
+    "better-sqlite3",
+    "pdf-parse",
+    "pdfjs-dist",
+    "@earendil-works/pi-agent-core",
+    "@earendil-works/pi-ai",
+    "typebox",
+  ],
   allowedDevOrigins: ["127.0.0.1"],
   // Next NFT often omits App Router route runtimes from standalone (pages work, /api 500).
   outputFileTracingIncludes: {

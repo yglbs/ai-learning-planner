@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { generatePlanFromCode, extractConcepts, generateStageProject } from "@/lib/ai";
+import { generateCodePlanByReading, StageGuideError } from "@/lib/source-agent";
+import { streamNdjson } from "@/lib/agent-stream";
 import { parseLearningMode, parseCareerIdentity } from "@/lib/learning-types";
 import { parseChallengeSettings } from "@/lib/challenge";
 import {
@@ -11,9 +13,12 @@ import path from "path";
 import {
   buildFileTree,
   countProjectFiles,
+  listProjectSourceFiles,
   resolveProjectPath,
   walkDir,
 } from "@/lib/code-project";
+
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
   try {
@@ -28,6 +33,7 @@ export async function POST(request: Request) {
       expected_outcome = "",
       learning_mode,
       career_identity,
+      focus = "",
       post_stage_review_enabled,
       answer_time_limit_enabled,
       answer_time_limit_seconds,
@@ -69,20 +75,12 @@ export async function POST(request: Request) {
       });
     }
 
-    const files: { relativePath: string; content: string; size: number }[] = [];
-    const totalChars = { count: 0 };
-    walkDir(resolvedPath, resolvedPath, files, totalChars);
-
-    if (files.length === 0) {
+    const sourceFiles = listProjectSourceFiles(resolvedPath);
+    if (sourceFiles.length === 0) {
       return NextResponse.json({ error: "项目中未找到可读取的源代码文件" }, { status: 400 });
     }
 
-    const codeContent = files.map((f) =>
-      `=== ${f.relativePath} ===\n${f.content}`
-    ).join("\n\n");
-
-    const generated = await generatePlanFromCode({
-      code_content: codeContent,
+    const learner = {
       project_name: projectName,
       file_tree: fileTree,
       duration_weeks,
@@ -93,9 +91,47 @@ export async function POST(request: Request) {
       expected_outcome,
       learning_mode: resolvedMode,
       career_identity: resolvedCareer,
-    });
+      focus: typeof focus === "string" ? focus : "",
+    };
 
-    const goalDesc = `深入学习项目「${projectName}」的代码实现（源码路径: ${resolvedPath}）`;
+    return streamNdjson(async (send) => {
+    let generated;
+    let filesRead: string[] = [];
+    try {
+      const explored = await generateCodePlanByReading({
+        project_path: resolvedPath,
+        ...learner,
+        onTrace: (text) => send({ type: "trace", text }),
+      });
+      generated = explored.plan;
+      filesRead = explored.filesRead;
+    } catch (agentError) {
+      if (agentError instanceof StageGuideError) throw agentError;
+      console.error("Local agent loop failed, falling back to snapshot:", agentError);
+      send({
+        type: "fallback",
+        text: `未走完 agent loop，已改用截断内容：${(agentError as Error).message}`,
+      });
+      const files: { relativePath: string; content: string; size: number }[] = [];
+      const totalChars = { count: 0 };
+      walkDir(resolvedPath, resolvedPath, files, totalChars);
+      if (files.length === 0) {
+        throw new Error("项目中未找到可读取的源代码文件");
+      }
+      const codeContent = files.map((f) =>
+        `=== ${f.relativePath} ===\n${f.content}`
+      ).join("\n\n");
+      generated = await generatePlanFromCode({
+        code_content: codeContent,
+        ...learner,
+      });
+      filesRead = files.map((f) => f.relativePath);
+    }
+
+    const focusText = typeof focus === "string" ? focus.trim().slice(0, 2000) : "";
+    const goalDesc = focusText
+      ? `深入学习项目「${projectName}」的代码实现（源码路径: ${resolvedPath}）。学员提示：${focusText}`
+      : `深入学习项目「${projectName}」的代码实现（源码路径: ${resolvedPath}）`;
 
     const planId = createPlan({
       title: generated.plan_title,
@@ -109,7 +145,7 @@ export async function POST(request: Request) {
       source_type: "code",
       source_path: resolvedPath,
       source_file_tree: fileTree,
-      source_files: files.map((f) => f.relativePath),
+      source_files: sourceFiles,
       learning_mode: resolvedMode,
       career_identity: resolvedCareer,
     });
@@ -215,10 +251,12 @@ export async function POST(request: Request) {
       console.error("Project generation failed (non-fatal):", e);
     }
 
-    return NextResponse.json({
+    send({
+      type: "done",
       planId,
       plan: generated,
-      stats: { files_read: files.length, total_chars: totalChars.count },
+      stats: { files_read: filesRead.length, total_chars: 0 },
+    });
     });
   } catch (e) {
     console.error("Code plan generation failed:", e);
